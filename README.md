@@ -17,12 +17,12 @@
 ### ⚡ Installation
 
 ```bash
-# Clone the repository
-git clone https://github.com/vadikonline1/hostingguard-pro.git
-cd hostingguard-pro
-
-# Make executable and run
-chmod +x install-full-stack.sh
+# 1. Clone the repository
+git clone https://github.com/vadikonline1/hostingguard-pro.git /etc/automation-web-hosting
+# 2. Make all scripts executable
+sudo chmod +x /etc/automation-web-hosting/*.sh
+# 3. Navigate to directory and run installation
+cd /etc/automation-web-hosting
 ```
 
 ### ⚙️ Configuration
@@ -44,6 +44,11 @@ FASTPANEL_PASSWORD=your_secure_password
 
 # Security Settings
 DAILY_SCAN_TIME=00:00
+```
+
+3. **Running your HostingGuard Pro:**
+```bash
+sudo ./install-full-stack.sh
 ```
 
 ## 🎯 Features
