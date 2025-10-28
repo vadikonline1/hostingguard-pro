@@ -5,14 +5,14 @@ set -e
 FAIL2BAN_DIR="/etc/fail2ban"
 BOUNCER_DIR="/etc/automation-web-hosting"
 SCRIPT_DIR="${BOUNCER_DIR}/scripts"
-NOTIFY_SCRIPT="${BOUNCER_DIR}/telegram_notify.sh"
+NOTIFY_SCRIPT="$BOUNCER_DIR/telegram_notify.sh"
 BACKUP_DIR="/var/backups/fail2ban"
 THREAT_INTEL_DIR="/var/lib/fail2ban/threat-intel"
-AUTO_HEAL_SCRIPT="${SCRIPT_DIR}/fail2ban_autoheal.sh"
+AUTO_HEAL_SCRIPT="$SCRIPT_DIR/fail2ban_autoheal.sh"
 CURRENT_PATH_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # === ÎNCĂRCARE VARIABILE ENV ===
-ENV_FILES="$BOUNCER_DIR/*.env"
+ENV_FILES="$CURRENT_PATH_DIR/../*.env"
 env_loaded=0
 
 for env_file in $ENV_FILES; do
@@ -24,7 +24,7 @@ for env_file in $ENV_FILES; do
 done
 
 if [ $env_loaded -eq 0 ]; then
-    echo "[!] WARNING: No .env files found in $BOUNCER_DIR/"
+    echo "[!] WARNING: No .env files found in $CURRENT_PATH_DIR/../"
 fi
 
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
@@ -45,9 +45,6 @@ install_fail2ban() {
 check_dependencies() {
     echo "[*] Verific dependențe..."
     install_fail2ban
-    
-    # Creare director scripturi
-    mkdir -p "$SCRIPT_DIR"
     
     # Instalare dependințe Python pentru Threat Intelligence
     pip3 install requests beautifulsoup4 2>/dev/null || {
@@ -75,117 +72,139 @@ check_dependencies() {
     echo "[+] Toate dependențele sunt prezente"
 }
 
-# === SISTEM DE BACKUP AUTOMAT ===
-setup_backup_system() {
-    echo "[*] Configurare sistem backup automat..."
+# === CURĂȚARE CONFIGURAȚIE VECHIE ===
+clean_old_config() {
+    echo "[*] Curăț configurație veche Fail2Ban..."
     
-    mkdir -p "$BACKUP_DIR"
+    # Oprește Fail2Ban
+    systemctl stop fail2ban 2>/dev/null || true
+    sleep 2
     
-    # Script de backup
-    cat > "${SCRIPT_DIR}/fail2ban-backup.sh" << 'EOF'
-#!/bin/bash
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-BOUNCER_DIR="$(dirname "$SCRIPT_DIR")"
-NOTIFY_SCRIPT="$NOTIFY_SCRIPT"
-
-# Încarcă variabilele din .env files
-if [ -f "${BOUNCER_DIR}/hosting.env" ]; then
-    source "${BOUNCER_DIR}/hosting.env"
-fi
-
-BACKUP_DIR="/var/backups/fail2ban"
-CONF_DIR="/etc/fail2ban"
-DATE=$(date '+%Y-%m-%d_%H-%M-%S')
-BACKUP_FILE="$BACKUP_DIR/fail2ban_backup_$DATE.tar.gz"
-
-echo "[*] Creare backup Fail2Ban..."
-tar -czf "$BACKUP_FILE" "$CONF_DIR" /var/lib/fail2ban 2>/dev/null
-
-if [ $? -eq 0 ]; then
-    echo "[+] Backup creat: $BACKUP_FILE"
+    # Șterge toate configurările noastre vechi
+    rm -f "$FAIL2BAN_DIR/jail.d/behavioral.conf"
+    rm -f "$FAIL2BAN_DIR/jail.d/escalation.conf"
+    rm -f "$FAIL2BAN_DIR/filter.d/behavioral-analysis.conf"
+    rm -f "$FAIL2BAN_DIR/filter.d/web-attacks.conf"
+    rm -f "$FAIL2BAN_DIR/filter.d/auth-attacks.conf"
+    rm -f "$FAIL2BAN_DIR/filter.d/web-scanners.conf"
+    rm -f "$FAIL2BAN_DIR/filter.d/server-errors.conf"
+    rm -f "$FAIL2BAN_DIR/action.d/telegram-simple.conf"
+    rm -f "$FAIL2BAN_DIR/action.d/telegram-escalation.conf"
     
-    # Notificare succes backup
-    if [ -n "$TELEGRAM_BOT_TOKEN" ] && [ -n "$TELEGRAM_CHAT_ID" ]; then
-        MESSAGE="💾 Backup Fail2Ban Creat
-Server: $(hostname -f)
-Backup: $BACKUP_FILE
-Data: $(date '+%Y-%m-%d %H:%M:%S')"
-        
-        export TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID
-        "$NOTIFY_SCRIPT" "$MESSAGE" >/dev/null 2>&1
-    fi
+    # Curăță iptables
+    iptables -D INPUT -p tcp -m multiport --dports 80,443 -j f2b-web-attacks 2>/dev/null || true
+    iptables -D INPUT -p tcp -m multiport --dports 80,443,22 -j f2b-auth-attacks 2>/dev/null || true
+    iptables -D INPUT -p tcp --dport 22 -j f2b-sshd 2>/dev/null || true
     
-    # Șterge backup-uri mai vechi de 7 zile
-    find "$BACKUP_DIR" -name "fail2ban_backup_*.tar.gz" -mtime +7 -delete
-else
-    echo "[-] Eroare la crearea backup-ului"
-    exit 1
-fi
-EOF
-
-    chmod +x "${SCRIPT_DIR}/fail2ban-backup.sh"
-    
-    # Adaugă în crontab - backup zilnic la 2 AM
-    (crontab -l 2>/dev/null | grep -v "fail2ban-backup.sh"; echo "0 2 * * * ${SCRIPT_DIR}/fail2ban-backup.sh") | crontab -
-    
-    echo "[+] Sistem backup configurat (backup zilnic la 2 AM)"
+    echo "[+] Configurație veche curățată"
 }
 
-# === THREAT INTELLIGENCE INTEGRATION ===
-setup_threat_intelligence() {
-    echo "[*] Configurare Threat Intelligence..."
+# === CREARE DIRECTOR SCRIPTURI ===
+create_script_directory() {
+    echo "[*] Creez directorul pentru scripturi: $SCRIPT_DIR"
+    mkdir -p "$SCRIPT_DIR"
+    chmod 755 "$SCRIPT_DIR"
+    echo "[+] Director scripturi creat: $SCRIPT_DIR"
+}
+
+# === CONFIGURARE FAIL2BAN DE BAZĂ ===
+setup_basic_fail2ban() {
+    echo "[*] Configurare Fail2Ban de bază..."
     
-    mkdir -p "$THREAT_INTEL_DIR"
-    
-    # Script pentru descărcare liste de amenințări
-    cat > "${SCRIPT_DIR}/update-threat-intel.sh" << 'EOF'
-#!/bin/bash
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-BOUNCER_DIR="$(dirname "$SCRIPT_DIR")"
-NOTIFY_SCRIPT="$NOTIFY_SCRIPT"
-
-# Încarcă variabilele din .env files
-if [ -f "${BOUNCER_DIR}/hosting.env" ]; then
-    source "${BOUNCER_DIR}/hosting.env"
-fi
-
-THREAT_INTEL_DIR="/var/lib/fail2ban/threat-intel"
-
-echo "[*] Actualizare liste Threat Intelligence..."
-
-# Listă IP-uri malitioase cunoscute
-curl -s "https://lists.blocklist.de/lists/all.txt" -o "$THREAT_INTEL_DIR/blocklist_de.txt" 2>/dev/null
-curl -s "https://www.spamhaus.org/drop/drop.txt" -o "$THREAT_INTEL_DIR/spamhaus_drop.txt" 2>/dev/null
-curl -s "https://www.spamhaus.org/drop/edrop.txt" -o "$THREAT_INTEL_DIR/spamhaus_edrop.txt" 2>/dev/null
-
-# Combina toate listele
-cat "$THREAT_INTEL_DIR"/*.txt 2>/dev/null | grep -Eo '([0-9]{1,3}\.){3}[0-9]{1,3}(/[0-9]{1,2})?' | sort -u > "$THREAT_INTEL_DIR/combined_threats.txt"
-
-COUNT=$(wc -l < "$THREAT_INTEL_DIR/combined_threats.txt" 2>/dev/null || echo 0)
-
-# Notifică actualizarea
-if [ -n "$TELEGRAM_BOT_TOKEN" ] && [ -n "$TELEGRAM_CHAT_ID" ]; then
-    MESSAGE="🔍 Threat Intelligence Actualizat
-Liste IP-uri malitioase: $COUNT
-Server: $(hostname -f)
-Timp: $(date '+%Y-%m-%d %H:%M:%S')"
-    
-    export TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID
-    "$NOTIFY_SCRIPT" "$MESSAGE" >/dev/null 2>&1
-fi
-
-echo "[+] Threat Intelligence actualizat: $COUNT IP-uri"
+    # Creare filtre de bază
+    cat > "$FAIL2BAN_DIR/filter.d/web-attacks.conf" << 'EOF'
+[Definition]
+failregex = ^<HOST> -.*"(GET|POST|HEAD).*(wp-login\.php|xmlrpc\.php|wp-config\.php|wp-config-sample\.php|wp-cli\.php|wp-signup\.php|wp-cron\.php|install\.php|readme\.html|license\.txt|/admin|/wp-admin|/wp-content/plugins/|/wp-includes/|/phpinfo\.php|/config\.php|/shell|/eval-stdin\.php|/composer\.json|/autoload\.php|/vendor/).*HTTP.*"
+            ^<HOST> -.*"(GET|POST).*\.(bak|old|backup|sql|tar|gz|env|git).*HTTP.*"
+            ^<HOST> -.*"(GET|POST).*(union|select|insert|update|delete|drop|exec).*HTTP.*"
+ignoreregex =
 EOF
 
-    chmod +x "${SCRIPT_DIR}/update-threat-intel.sh"
-    
-    # Rulează prima actualizare
-    "${SCRIPT_DIR}/update-threat-intel.sh"
-    
-    # Programează actualizări zilnice
-    (crontab -l 2>/dev/null | grep -v "update-threat-intel.sh"; echo "0 3 * * * ${SCRIPT_DIR}/update-threat-intel.sh") | crontab -
-    
-    echo "[+] Threat Intelligence configurat (actualizare zilnică la 3 AM)"
+    # Filtru pentru atacuri autentificare
+    cat > "$FAIL2BAN_DIR/filter.d/auth-attacks.conf" << 'EOF'
+[Definition]
+failregex = ^<HOST>.*(authentication failure|Failed password|invalid user|Unknown user).*
+            ^<HOST> -.*"POST.*/(wp-login\.php|xmlrpc\.php|admin|login|user-login).*HTTP.*"
+            ^<HOST> -.*"POST.*/phpmyadmin.*HTTP.*"
+ignoreregex =
+EOF
+
+    # Filtru pentru scanere
+    cat > "$FAIL2BAN_DIR/filter.d/web-scanners.conf" << 'EOF'
+[Definition]
+failregex = ^<HOST> -.*"(GET|POST).*(nikto|acunetix|nessus|burp|sqlmap|nmap|python-requests|curl|wget).*HTTP.*"
+            ^<HOST> -.*"GET.*/(phpinfo|test|debug).*HTTP.*"
+            ^<HOST> -.*"GET.*/\.(git|svn|hg).*HTTP.*"
+ignoreregex =
+EOF
+
+    # Filtru pentru erori server
+    cat > "$FAIL2BAN_DIR/filter.d/server-errors.conf" << 'EOF'
+[Definition]
+failregex = ^<HOST> -.*"GET.*HTTP.*" (500|502|503|504)
+            ^<HOST>.*PHP (Fatal error|Parse error|Warning).*
+            ^<HOST>.*(timeout|Time-out|connection timed out).*
+ignoreregex =
+EOF
+
+    # Configurare jail de bază
+    cat > "$FAIL2BAN_DIR/jail.local" << 'EOF'
+[DEFAULT]
+ignoreip = 127.0.0.1/8 ::1
+bantime = 7200
+findtime = 600
+maxretry = 3
+backend = auto
+banaction = iptables-multiport
+
+[sshd]
+enabled = true
+port = ssh
+filter = sshd
+logpath = /var/log/auth.log
+maxretry = 3
+bantime = 7200
+
+[web-attacks]
+enabled = true
+port = http,https
+filter = web-attacks
+logpath = /var/log/nginx/access.log
+          /var/log/apache2/access.log
+maxretry = 3
+bantime = 7200
+
+[auth-attacks]
+enabled = true
+port = http,https,ssh
+filter = auth-attacks
+logpath = /var/log/auth.log
+          /var/log/apache2/error.log
+maxretry = 3
+bantime = 7200
+
+[web-scanners]
+enabled = true
+port = http,https
+filter = web-scanners
+logpath = /var/log/nginx/access.log
+          /var/log/apache2/access.log
+maxretry = 2
+bantime = 10800
+findtime = 300
+
+[server-errors]
+enabled = true
+port = http,https
+filter = server-errors
+logpath = /var/log/nginx/error.log
+          /var/log/apache2/error.log
+maxretry = 5
+bantime = 3600
+findtime = 900
+EOF
+
+    echo "[+] Fail2Ban de bază configurat"
 }
 
 # === BEHAVIORAL ANALYSIS ===
@@ -209,8 +228,9 @@ ignoreregex =
 maxlines = 10
 EOF
 
-    # Jail pentru analiză comportamentală
-    cat >> "$FAIL2BAN_DIR/jail.d/behavioral.conf" << 'EOF'
+    # Jail pentru analiză comportamentală - DOAR DACA NU EXISTA DEJA
+    if [ ! -f "$FAIL2BAN_DIR/jail.d/behavioral.conf" ]; then
+        cat > "$FAIL2BAN_DIR/jail.d/behavioral.conf" << 'EOF'
 [behavioral-analysis]
 enabled = true
 port = http,https,ssh
@@ -222,10 +242,142 @@ maxretry = 15
 findtime = 300
 bantime = 3600
 action = %(action_)s
-         telegram-simple
+EOF
+        echo "[+] Behavioral Analysis configurat"
+    else
+        echo "[+] Behavioral Analysis deja configurat"
+    fi
+}
+
+# === SISTEM DE BACKUP AUTOMAT ===
+setup_backup_system() {
+    echo "[*] Configurare sistem backup automat..."
+    
+    mkdir -p "$BACKUP_DIR"
+    
+    # Script de backup
+    cat > "$SCRIPT_DIR/fail2ban-backup.sh" << 'EOF'
+#!/bin/bash
+BOUNCER_DIR="/etc/automation-web-hosting"
+SCRIPT_DIR="$BOUNCER_DIR/scripts"
+NOTIFY_SCRIPT="$BOUNCER_DIR/telegram_notify.sh"
+
+# Încarcă variabilele din .env files
+if [ -f "$BOUNCER_DIR/hosting.env" ]; then
+    source "$BOUNCER_DIR/hosting.env"
+fi
+
+BACKUP_DIR="/var/backups/fail2ban"
+CONF_DIR="/etc/fail2ban"
+DATE=$(date '+%Y-%m-%d_%H-%M-%S')
+BACKUP_FILE="$BACKUP_DIR/fail2ban_backup_$DATE.tar.gz"
+
+echo "[*] Creare backup Fail2Ban..."
+tar -czf "$BACKUP_FILE" "$CONF_DIR" /var/lib/fail2ban 2>/dev/null
+
+if [ $? -eq 0 ]; then
+    echo "[+] Backup creat: $BACKUP_FILE"
+    
+    # Notificare succes
+    if [ -n "$TELEGRAM_BOT_TOKEN" ] && [ -n "$TELEGRAM_CHAT_ID" ]; then
+        MESSAGE="💾 Backup Fail2Ban Creat
+Server: $(hostname -f)
+Backup: $BACKUP_FILE
+Data: $(date '+%Y-%m-%d %H:%M:%S')
+Status: SUCCES ✅"
+        
+        export TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID
+        "$NOTIFY_SCRIPT" "$MESSAGE" >/dev/null 2>&1
+    fi
+    
+    # Șterge backup-uri mai vechi de 7 zile
+    find "$BACKUP_DIR" -name "fail2ban_backup_*.tar.gz" -mtime +7 -delete
+else
+    echo "[-] Eroare la crearea backup-ului"
+    
+    # Notificare eroare
+    if [ -n "$TELEGRAM_BOT_TOKEN" ] && [ -n "$TELEGRAM_CHAT_ID" ]; then
+        MESSAGE="❌ Eroare Backup Fail2Ban
+Server: $(hostname -f)
+Data: $(date '+%Y-%m-%d %H:%M:%S')
+Status: EROARE ⚠️"
+        
+        export TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID
+        "$NOTIFY_SCRIPT" "$MESSAGE" >/dev/null 2>&1
+    fi
+    exit 1
+fi
 EOF
 
-    echo "[+] Behavioral Analysis configurat"
+    chmod +x "$SCRIPT_DIR/fail2ban-backup.sh"
+    
+    # Adaugă în crontab - backup zilnic la 2 AM
+    (crontab -l 2>/dev/null | grep -v "fail2ban-backup.sh"; echo "0 2 * * * $SCRIPT_DIR/fail2ban-backup.sh") | crontab -
+    
+    echo "[+] Sistem backup configurat (backup zilnic la 2 AM)"
+}
+
+# === THREAT INTELLIGENCE INTEGRATION ===
+setup_threat_intelligence() {
+    echo "[*] Configurare Threat Intelligence..."
+    
+    mkdir -p "$THREAT_INTEL_DIR"
+    
+    # Script pentru descărcare liste de amenințări
+    cat > "$SCRIPT_DIR/update-threat-intel.sh" << 'EOF'
+#!/bin/bash
+BOUNCER_DIR="/etc/automation-web-hosting"
+NOTIFY_SCRIPT="$BOUNCER_DIR/telegram_notify.sh"
+
+# Încarcă variabilele din .env files
+if [ -f "$BOUNCER_DIR/hosting.env" ]; then
+    source "$BOUNCER_DIR/hosting.env"
+fi
+
+THREAT_INTEL_DIR="/var/lib/fail2ban/threat-intel"
+mkdir -p "$THREAT_INTEL_DIR"
+
+echo "[*] Actualizare liste Threat Intelligence..."
+
+# Descarcă liste de amenințări
+echo "[*] Descărcare Blocklist.de..."
+curl -s --connect-timeout 10 "https://lists.blocklist.de/lists/all.txt" -o "$THREAT_INTEL_DIR/blocklist_de.txt" 2>/dev/null
+
+echo "[*] Descărcare Spamhaus DROP..."
+curl -s --connect-timeout 10 "https://www.spamhaus.org/drop/drop.txt" -o "$THREAT_INTEL_DIR/spamhaus_drop.txt" 2>/dev/null
+
+echo "[*] Descărcare Spamhaus EDROP..."
+curl -s --connect-timeout 10 "https://www.spamhaus.org/drop/edrop.txt" -o "$THREAT_INTEL_DIR/spamhaus_edrop.txt" 2>/dev/null
+
+# Combina toate listele
+echo "[*] Combinare liste..."
+cat "$THREAT_INTEL_DIR"/*.txt 2>/dev/null | grep -Eo '([0-9]{1,3}\.){3}[0-9]{1,3}(/[0-9]{1,2})?' | sort -u > "$THREAT_INTEL_DIR/combined_threats.txt"
+
+COUNT=$(wc -l < "$THREAT_INTEL_DIR/combined_threats.txt" 2>/dev/null || echo 0)
+
+# Notifică actualizarea
+if [ -n "$TELEGRAM_BOT_TOKEN" ] && [ -n "$TELEGRAM_CHAT_ID" ]; then
+    MESSAGE="🔍 Threat Intelligence Actualizat
+Liste IP-uri malitioase: $COUNT
+Server: $(hostname -f)
+Timp: $(date '+%Y-%m-%d %H:%M:%S')"
+    
+    export TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID
+    "$NOTIFY_SCRIPT" "$MESSAGE" >/dev/null 2>&1
+fi
+
+echo "[+] Threat Intelligence actualizat: $COUNT IP-uri"
+EOF
+
+    chmod +x "$SCRIPT_DIR/update-threat-intel.sh"
+    
+    # Rulează prima actualizare
+    $SCRIPT_DIR/update-threat-intel.sh
+    
+    # Programează actualizări zilnice
+    (crontab -l 2>/dev/null | grep -v "update-threat-intel.sh"; echo "0 3 * * * $SCRIPT_DIR/update-threat-intel.sh") | crontab -
+    
+    echo "[+] Threat Intelligence configurat (actualizare zilnică la 3 AM)"
 }
 
 # === AUTO-HEALING SYSTEM ===
@@ -234,20 +386,19 @@ setup_autohealing() {
     
     cat > "$AUTO_HEAL_SCRIPT" << 'EOF'
 #!/bin/bash
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-BOUNCER_DIR="$(dirname "$SCRIPT_DIR")"
-NOTIFY_SCRIPT="$NOTIFY_SCRIPT"
+BOUNCER_DIR="/etc/automation-web-hosting"
+NOTIFY_SCRIPT="$BOUNCER_DIR/telegram_notify.sh"
 
 # Încarcă variabilele din .env files
-if [ -f "${BOUNCER_DIR}/hosting.env" ]; then
-    source "${BOUNCER_DIR}/hosting.env"
+if [ -f "$BOUNCER_DIR/hosting.env" ]; then
+    source "$BOUNCER_DIR/hosting.env"
 fi
 
 send_alert() {
     local message="$1"
     if [ -n "$TELEGRAM_BOT_TOKEN" ] && [ -n "$TELEGRAM_CHAT_ID" ]; then
         export TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID
-        "$NOTIFY_SCRIPT" "$MESSAGE" >/dev/null 2>&1
+        "$NOTIFY_SCRIPT" "$message" >/dev/null 2>&1
     fi
 }
 
@@ -256,13 +407,7 @@ check_and_restart_service() {
     if ! systemctl is-active --quiet "$service"; then
         echo "[!] Service $service este oprit. Repornire..."
         systemctl restart "$service"
-        
-        # Notificare doar dacă repornirea a eșuat
-        if ! systemctl is-active --quiet "$service"; then
-            send_alert "🚨 CRITIC: Service $service nu poate fi repornit pe $(hostname -f)"
-        else
-            send_alert "🔄 Auto-Healing: Service $service repornit pe $(hostname -f)"
-        fi
+        send_alert "🔄 Auto-Healing: Service $service repornit pe $(hostname -f)"
     fi
 }
 
@@ -298,17 +443,16 @@ EOF
 setup_advanced_reporting() {
     echo "[*] Configurare raportare avansată..."
     
-    cat > "${SCRIPT_DIR}/fail2ban-report.sh" << 'EOF'
+    cat > "$SCRIPT_DIR/fail2ban-report.sh" << 'EOF'
 #!/bin/bash
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-BOUNCER_DIR="$(dirname "$SCRIPT_DIR")"
-NOTIFY_SCRIPT="$NOTIFY_SCRIPT"
+BOUNCER_DIR="/etc/automation-web-hosting"
+NOTIFY_SCRIPT="$BOUNCER_DIR/telegram_notify.sh"
 LOG_FILE="/var/log/fail2ban.log"
 REPORT_FILE="/tmp/fail2ban_report.txt"
 
 # Încarcă variabilele din .env files
-if [ -f "${BOUNCER_DIR}/hosting.env" ]; then
-    source "${BOUNCER_DIR}/hosting.env"
+if [ -f "$BOUNCER_DIR/hosting.env" ]; then
+    source "$BOUNCER_DIR/hosting.env"
 fi
 
 generate_report() {
@@ -357,10 +501,10 @@ else
 fi
 EOF
 
-    chmod +x "${SCRIPT_DIR}/fail2ban-report.sh"
+    chmod +x "$SCRIPT_DIR/fail2ban-report.sh"
     
     # Raport zilnic la 8 AM
-    (crontab -l 2>/dev/null | grep -v "fail2ban-report.sh"; echo "0 8 * * * ${SCRIPT_DIR}/fail2ban-report.sh daily") | crontab -
+    (crontab -l 2>/dev/null | grep -v "fail2ban-report.sh"; echo "0 8 * * * $SCRIPT_DIR/fail2ban-report.sh daily") | crontab -
     
     echo "[+] Sistem raportare avansată configurat"
 }
@@ -369,10 +513,10 @@ EOF
 setup_unified_interface() {
     echo "[*] Configurare interfață unificată..."
     
-    cat > "${SCRIPT_DIR}/security-manager.sh" << 'EOF'
+    cat > "$SCRIPT_DIR/security-manager.sh" << 'EOF'
 #!/bin/bash
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-BOUNCER_DIR="$(dirname "$SCRIPT_DIR")"
+BOUNCER_DIR="/etc/automation-web-hosting"
+SCRIPT_DIR="$BOUNCER_DIR/scripts"
 
 case "$1" in
     status)
@@ -381,7 +525,7 @@ case "$1" in
         ;;
     stats)
         echo "=== STATISTICI DETALIATE ==="
-        "${SCRIPT_DIR}/fail2ban-report.sh"
+        "$SCRIPT_DIR/fail2ban-report.sh"
         ;;
     unban)
         if [ -z "$2" ]; then
@@ -392,120 +536,106 @@ case "$1" in
         fail2ban-client set sshd unbanip "$2"
         fail2ban-client set web-attacks unbanip "$2"
         fail2ban-client set auth-attacks unbanip "$2"
-        fail2ban-client set escalation-web unbanip "$2"
+        fail2ban-client set web-scanners unbanip "$2"
         fail2ban-client set behavioral-analysis unbanip "$2"
         ;;
     backup)
         echo "[*] Creare backup configurație..."
-        "${SCRIPT_DIR}/fail2ban-backup.sh"
+        "$SCRIPT_DIR/fail2ban-backup.sh"
         ;;
     update-threat)
         echo "[*] Actualizare liste amenințări..."
-        "${SCRIPT_DIR}/update-threat-intel.sh"
+        "$SCRIPT_DIR/update-threat-intel.sh"
         ;;
     report)
         echo "[*] Generez raport..."
-        "${SCRIPT_DIR}/fail2ban-report.sh"
+        "$SCRIPT_DIR/fail2ban-report.sh"
         ;;
     autoheal)
-        echo "[*] Rulez verificare auto-healing..."
-        "${SCRIPT_DIR}/fail2ban_autoheal.sh"
+        echo "[*] Rulez Auto-Healing..."
+        "$SCRIPT_DIR/fail2ban_autoheal.sh"
         ;;
     *)
         echo "Security Manager - Interfață Unificată"
-        echo "Location: $SCRIPT_DIR"
         echo "Comenzi disponibile:"
-        echo "  status    - Status sistem"
-        echo "  stats     - Statistici detaliate"
-        echo "  unban IP  - Deblochează IP"
-        echo "  backup    - Backup configurație"
+        echo "  status        - Status sistem"
+        echo "  stats         - Statistici detaliate"
+        echo "  unban IP      - Deblochează IP"
+        echo "  backup        - Backup configurație"
         echo "  update-threat - Actualizează liste amenințări"
-        echo "  report    - Generează raport"
-        echo "  autoheal  - Rulează verificare auto-healing"
+        echo "  report        - Generează raport"
+        echo "  autoheal      - Rulează Auto-Healing manual"
         ;;
 esac
 EOF
 
-    chmod +x "${SCRIPT_DIR}/security-manager.sh"
+    chmod +x "$SCRIPT_DIR/security-manager.sh"
     
     # Creează symlink global pentru ușurința utilizării
-    ln -sf "${SCRIPT_DIR}/security-manager.sh" "/usr/local/bin/secmgr"
+    if [ -d "/usr/local/bin" ]; then
+        ln -sf "$SCRIPT_DIR/security-manager.sh" "/usr/local/bin/secmgr"
+        chmod +x "/usr/local/bin/secmgr"
+    fi
     
     echo "[+] Interfață unificată configurată"
     echo "[+] Utilizare: secmgr [status|stats|unban|backup|update-threat|report|autoheal]"
 }
 
-# === CONFIGURARE FAIL2BAN DE BAZĂ ===
-setup_basic_fail2ban() {
-    echo "[*] Configurare Fail2Ban de bază..."
+# === VERIFICARE CONFIGURARE ȘI REPORNIRE ===
+setup_and_verify_fail2ban() {
+    echo "[*] Verificare și pornire Fail2Ban..."
     
-    # Creare filtre de bază (web-attacks, auth-attacks, etc.)
-    # ... (păstrează secțiunile create_filters, create_telegram_action, etc. din scriptul anterior)
-    # Acestea rămân neschimbate, doar referințele la scripturi se vor actualiza
+    # Verifică configurația
+    echo "[*] Verific configurația Fail2Ban..."
+    if fail2ban-client -t; then
+        echo "[+] Configurația Fail2Ban este validă"
+    else
+        echo "[-] Configurația Fail2Ban are erori"
+        echo "[*] Repar configurația..."
+        
+        # Șterge fișierele problematice
+        rm -f "$FAIL2BAN_DIR/jail.d/behavioral.conf"
+        fail2ban-client -t
+    fi
     
-    # Exemplu pentru acțiunea Telegram actualizată:
-    cat > "/usr/local/bin/fail2ban-telegram-wrapper.sh" << 'EOF'
-#!/bin/bash
-JAIL_NAME="$1"
-ACTION="$2"
-IP="$3"
-
-SCRIPT_DIR="/etc/automation-web-hosting/scripts"
-TELEGRAM_SCRIPT="$NOTIFY_SCRIPT"
-SERVER_NAME=$(hostname -f)
-TIMESTAMP=$(date '+%Y-%m-%d %H:%M:%S')
-
-# Încarcă variabilele din .env files
-if [ -f "/etc/automation-web-hosting/hosting.env" ]; then
-    source "/etc/automation-web-hosting/hosting.env"
-fi
-
-if [ "$ACTION" = "ban" ]; then
-    MESSAGE="🚨 Fail2Ban - IP Blocat 🚨
-Jail: $JAIL_NAME
-IP: $IP
-Server: $SERVER_NAME
-Timp: $TIMESTAMP
-Acțiune: Blocat"
-elif [ "$ACTION" = "unban" ]; then
-    MESSAGE="✅ Fail2Ban - IP Deblocat ✅
-Jail: $JAIL_NAME
-IP: $IP
-Server: $SERVER_NAME
-Timp: $TIMESTAMP
-Acțiune: Deblocat"
-else
-    exit 0
-fi
-
-# Trimite notificarea
-export TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID
-"$TELEGRAM_SCRIPT" "$MESSAGE"
-EOF
-
-    chmod +x "/usr/local/bin/fail2ban-telegram-wrapper.sh"
+    # Porneste Fail2Ban
+    echo "[*] Pornesc Fail2Ban..."
+    systemctl enable fail2ban
+    systemctl restart fail2ban
     
-    echo "[+] Configurație Fail2Ban de bază completă"
+    # Așteaptă și verifică statusul
+    sleep 5
+    
+    if systemctl is-active --quiet fail2ban; then
+        echo "[+] Fail2Ban rulează cu succes"
+        return 0
+    else
+        echo "[-] Fail2Ban nu rulează"
+        echo "[*] Verific erorile..."
+        journalctl -u fail2ban -n 10 --no-pager
+        return 1
+    fi
 }
 
 # === VERIFICARE ȘI TESTARE EXTINSĂ ===
 verify_and_test() {
     echo "[*] Verificare și testare extinsă..."
     
-    # Așteaptă inițializarea
-    sleep 5
-    
     # Testează toate componentele
     echo "[*] Testare servicii..."
-    systemctl is-active fail2ban && echo "[+] Fail2Ban - ACTIV" || echo "[-] Fail2Ban - INACTIV"
+    if systemctl is-active fail2ban; then
+        echo "[+] Fail2Ban - ACTIV"
+    else
+        echo "[-] Fail2Ban - INACTIV"
+        return 1
+    fi
     
     echo "[*] Testare scripturi..."
-    [ -x "${SCRIPT_DIR}/fail2ban-backup.sh" ] && echo "[+] Backup Script - OK" || echo "[-] Backup Script - FAIL"
-    [ -x "${SCRIPT_DIR}/update-threat-intel.sh" ] && echo "[+] Threat Intel - OK" || echo "[-] Threat Intel - FAIL"
-    [ -x "${SCRIPT_DIR}/fail2ban-report.sh" ] && echo "[+] Reporting - OK" || echo "[-] Reporting - FAIL"
+    [ -x "$SCRIPT_DIR/fail2ban-backup.sh" ] && echo "[+] Backup Script - OK" || echo "[-] Backup Script - FAIL"
+    [ -x "$SCRIPT_DIR/update-threat-intel.sh" ] && echo "[+] Threat Intel - OK" || echo "[-] Threat Intel - FAIL"
+    [ -x "$SCRIPT_DIR/fail2ban-report.sh" ] && echo "[+] Reporting - OK" || echo "[-] Reporting - FAIL"
     [ -x "$AUTO_HEAL_SCRIPT" ] && echo "[+] Auto-Healing - OK" || echo "[-] Auto-Healing - FAIL"
-    [ -x "${SCRIPT_DIR}/security-manager.sh" ] && echo "[+] Security Manager - OK" || echo "[-] Security Manager - FAIL"
-    [ -L "/usr/local/bin/secmgr" ] && echo "[+] Symlink Global - OK" || echo "[-] Symlink Global - FAIL"
+    [ -x "$SCRIPT_DIR/security-manager.sh" ] && echo "[+] Security Manager - OK" || echo "[-] Security Manager - FAIL"
     
     # Testează notificările
     if [ -n "$TELEGRAM_BOT_TOKEN" ] && [ -n "$TELEGRAM_CHAT_ID" ]; then
@@ -521,11 +651,12 @@ verify_and_test() {
 ✓ Behavioral Analysis
 ✓ Management Simplificat
 
-📁 Locatie Scripturi: $SCRIPT_DIR
+📁 Scripturi: $SCRIPT_DIR
 Status: OPERATIONAL 🟢" >/dev/null 2>&1 && echo "[+] Notificări - OK" || echo "[-] Notificări - FAIL"
     fi
     
     echo "[+] Toate testele finalizate"
+    return 0
 }
 
 # === EXECUȚIE PRINCIPALĂ ===
@@ -533,7 +664,7 @@ main() {
     echo "=================================================="
     echo "    SISTEM AVANSAT SECURITATE FAIL2BAN"
     echo "=================================================="
-    echo "📁 Director Scripturi: $SCRIPT_DIR"
+    echo "📁 Director scripturi: $SCRIPT_DIR"
     echo "✅ Protecție Multi-Nivel - De la atacuri simple la DDoS"
     echo "✅ Threat Intelligence - Integrare cu surse externe" 
     echo "✅ Auto-Healing - Sistemul se repară singur"
@@ -549,12 +680,17 @@ main() {
         exit 1
     fi
     
-    # Creare director principal
-    mkdir -p "$BOUNCER_DIR"
-    mkdir -p "$SCRIPT_DIR"
+    # Curățare configurație veche
+    clean_old_config
+    
+    # Creare director scripturi
+    create_script_directory
     
     # Instalare dependențe
     check_dependencies
+    
+    # Setup componente de bază
+    setup_basic_fail2ban
     
     # Setup componente avansate
     setup_backup_system
@@ -563,41 +699,56 @@ main() {
     setup_autohealing
     setup_advanced_reporting
     setup_unified_interface
-    setup_basic_fail2ban
     
-    # Verificare finală
-    verify_and_test
+    # Verificare și pornire
+    if setup_and_verify_fail2ban; then
+        # Verificare finală
+        if verify_and_test; then
+            echo ""
+            echo "=================================================="
+            echo "✅ SISTEM SECURITATE AVANSAT CONFIGURAT CU SUCCES!"
+            echo "=================================================="
+        else
+            echo ""
+            echo "=================================================="
+            echo "⚠️  SISTEM CONFIGURAT CU AVERTISMENTE"
+            echo "=================================================="
+        fi
+    else
+        echo ""
+        echo "=================================================="
+        echo "❌ CONFIGURARE EȘUATĂ - VERIFICĂ EROARILE"
+        echo "=================================================="
+        exit 1
+    fi
     
     echo ""
-    echo "=================================================="
-    echo "✅ SISTEM SECURITATE AVANSAT CONFIGURAT CU SUCCES!"
-    echo "=================================================="
-    echo ""
-    echo "📁 STRUCTURA DIRECTOR:"
-    echo "   $BOUNCER_DIR/          - Director principal"
-    echo "   $SCRIPT_DIR/           - Toate scripturile"
-    echo "   $NOTIFY_SCRIPT"
-    echo "   ${SCRIPT_DIR}/security-manager.sh"
-    echo "   ${SCRIPT_DIR}/fail2ban-backup.sh"
-    echo "   ${SCRIPT_DIR}/update-threat-intel.sh"
-    echo "   ${SCRIPT_DIR}/fail2ban-report.sh"
-    echo "   ${SCRIPT_DIR}/fail2ban_autoheal.sh"
+    echo "📁 LOCAȚIE SCRIPTURI: $SCRIPT_DIR"
     echo ""
     echo "🔧 COMENZI MANAGEMENT:"
-    echo "   secmgr status          - Status sistem"
-    echo "   secmgr stats           - Statistici detaliate" 
-    echo "   secmgr unban IP        - Deblochează IP"
-    echo "   secmgr backup          - Backup configurație"
-    echo "   secmgr update-threat   - Actualizează amenințări"
-    echo "   secmgr report          - Raport complet"
-    echo "   secmgr autoheal        - Verificare auto-healing"
+    echo "   secmgr status        - Status sistem"
+    echo "   secmgr stats         - Statistici detaliate" 
+    echo "   secmgr unban IP      - Deblochează IP"
+    echo "   secmgr backup        - Backup configurație"
+    echo "   secmgr update-threat - Actualizează amenințări"
+    echo "   secmgr report        - Raport complet"
+    echo "   secmgr autoheal      - Auto-Healing manual"
+    echo ""
+    echo "📊 MONITORIZARE:"
+    echo "   tail -f /var/log/fail2ban.log"
+    echo "   fail2ban-client status"
     echo ""
     echo "🔄 SERVICII AUTOMATE:"
-    echo "   Backup zilnic (2 AM)    - ${SCRIPT_DIR}/fail2ban-backup.sh"
-    echo "   Threat Intel (3 AM)     - ${SCRIPT_DIR}/update-threat-intel.sh"
-    echo "   Raport zilnic (8 AM)    - ${SCRIPT_DIR}/fail2ban-report.sh"
-    echo "   Auto-Healing (5 min)    - ${SCRIPT_DIR}/fail2ban_autoheal.sh"
+    echo "   Backup zilnic (2 AM)       - $SCRIPT_DIR/fail2ban-backup.sh"
+    echo "   Threat Intel update (3 AM) - $SCRIPT_DIR/update-threat-intel.sh" 
+    echo "   Raport zilnic (8 AM)       - $SCRIPT_DIR/fail2ban-report.sh"
+    echo "   Auto-Healing (la 5 minute) - $AUTO_HEAL_SCRIPT"
     echo "=================================================="
+    
+    # Afișare conținut director scripturi
+    echo ""
+    echo "📋 SCRIPTURI INSTALATE:"
+    ls -la "$SCRIPT_DIR"
 }
 
 # Rulează scriptul principal
