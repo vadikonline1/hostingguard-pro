@@ -194,7 +194,7 @@ main_installation() {
         "$SETUP_DIR/setup_directories.sh:::Creating directory structure"
         "$CURRENT_PATH_DIR/telegram_notify.sh:::Setting up Telegram notifications"
         "$SETUP_DIR/setup_fastpanel.sh:::Installing FastPanel"
-        "$SETUP_DIR/setup-fail2ban.sh:::Installing Fail2Ban security"
+        "$SETUP_DIR/setup_fail2ban.sh:::Installing Fail2Ban security"
         "$SETUP_DIR/setup_antivirus.sh:::Setting up ClamAV protection"
     )
     
