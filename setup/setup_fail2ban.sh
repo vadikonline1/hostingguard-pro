@@ -659,6 +659,274 @@ Status: OPERATIONAL 🟢" >/dev/null 2>&1 && echo "[+] Notificări - OK" || echo
     return 0
 }
 
+# === CONFIGURARE SISTEM NOTIFICĂRI TELEGRAM AVANSAT ===
+setup_advanced_telegram_system() {
+    echo "[*] Configurare sistem notificări Telegram avansat..."
+    
+    # Script unic pentru toate notificările cu logică inteligentă
+    cat > "$SCRIPT_DIR/fail2ban-telegram-intelligent.sh" << 'EOF'
+#!/bin/bash
+BOUNCER_DIR="/etc/automation-web-hosting"
+NOTIFY_SCRIPT="$BOUNCER_DIR/telegram_notify.sh"
+
+# Încarcă variabilele din .env files
+if [ -f "$BOUNCER_DIR/hosting.env" ]; then
+    source "$BOUNCER_DIR/hosting.env"
+fi
+
+JAIL_NAME="$1"
+ACTION="$2"
+IP="$3"
+BANTIME="${4:-7200}"
+
+SERVER_NAME=$(hostname -f)
+TIMESTAMP=$(date '+%Y-%m-%d %H:%M:%S')
+
+# === SISTEM ANTI-DUPLICARE ===
+NOTIFICATION_CACHE="/tmp/fail2ban_notifications.cache"
+touch "$NOTIFICATION_CACHE"
+
+# Evită notificări duplicate pentru același IP în ultimele 30 de minute
+CACHE_KEY="${IP}:${JAIL_NAME}:${ACTION}:$(date '+%Y-%m-%d %H')"
+if grep -q "$CACHE_KEY" "$NOTIFICATION_CACHE" 2>/dev/null; then
+    echo "[*] Notificare duplicat pentru $IP în jail $JAIL_NAME. Skip."
+    exit 0
+fi
+
+# Adaugă în cache pentru 30 de minute
+echo "$CACHE_KEY" >> "$NOTIFICATION_CACHE"
+
+# Curăță cache-ul vechi (mai vechi de 2 ore)
+sed -i "/$(date -d '2 hours ago' '+%Y-%m-%d %H')/d" "$NOTIFICATION_CACHE" 2>/dev/null
+
+# === LOGICĂ NOTIFICĂRI INTELIGENTE ===
+if [ "$ACTION" = "ban" ]; then
+    # Analiză threat intelligence
+    THREAT_INTEL_DIR="/var/lib/fail2ban/threat-intel"
+    IS_KNOWN_THREAT=""
+    if [ -f "$THREAT_INTEL_DIR/combined_threats.txt" ]; then
+        if grep -q "$IP" "$THREAT_INTEL_DIR/combined_threats.txt" 2>/dev/null; then
+            IS_KNOWN_THREAT="🔍 IP cunoscut în liste threat intelligence"
+        fi
+    fi
+    
+    # Verifică dacă este recidivist
+    BAN_HISTORY=$(grep -c "Ban $IP" /var/log/fail2ban.log 2>/dev/null || echo 0)
+    
+    # Determină nivelul de severitate
+    if [ "$BANTIME" -ge 2592000 ]; then
+        # ESCALATION - 30 days
+        MESSAGE="🚨🚨 ESCALATION FAIL2BAN - BLOCARE 30 ZILE 🚨🚨
+Jail: $JAIL_NAME
+IP: $IP
+Server: $SERVER_NAME  
+Timp: $TIMESTAMP
+Durată: 30 ZILE
+Blocări anterioare: $BAN_HISTORY
+$IS_KNOWN_THREAT
+Status: ATACATOR RECIDIVIST"
+    
+    elif [ "$BANTIME" -ge 86400 ]; then
+        # Blocare lungă > 1 day
+        MESSAGE="🚨🚨 FAIL2BAN - BLOCARE EXTINSĂ 🚨🚨
+Jail: $JAIL_NAME  
+IP: $IP
+Server: $SERVER_NAME
+Timp: $TIMESTAMP
+Durată: $((BANTIME/86400)) zile
+Blocări anterioare: $BAN_HISTORY
+$IS_KNOWN_THREAT
+Status: ACTIVITATE SUSPECTĂ"
+    
+    elif [ "$BAN_HISTORY" -gt 3 ]; then
+        # Recidivist cu blocare normală
+        MESSAGE="🚨⚠️ FAIL2BAN - IP RECIDIVIST ⚠️🚨
+Jail: $JAIL_NAME
+IP: $IP
+Server: $SERVER_NAME
+Timp: $TIMESTAMP  
+Durată: $((BANTIME/3600)) ore
+Blocări anterioare: $BAN_HISTORY
+$IS_KNOWN_THREAT
+Status: ACTIVITATE REPETATĂ"
+    
+    else
+        # Blocare normală
+        MESSAGE="🚨 FAIL2BAN - IP BLOCAT 🚨
+Jail: $JAIL_NAME
+IP: $IP  
+Server: $SERVER_NAME
+Timp: $TIMESTAMP
+Durată: $((BANTIME/3600)) ore
+Blocări anterioare: $BAN_HISTORY
+$IS_KNOWN_THREAT
+Status: BLOCAT NORMAL"
+    fi
+
+elif [ "$ACTION" = "unban" ]; then
+    # Notificare deblocare
+    MESSAGE="✅ FAIL2BAN - IP DEBLOCAT ✅
+Jail: $JAIL_NAME
+IP: $IP
+Server: $SERVER_NAME  
+Timp: $TIMESTAMP
+Acțiune: Deblocat manual/automat"
+    
+else
+    exit 0
+fi
+
+# === TRIMITE NOTIFICAREA ===
+if [ -n "$TELEGRAM_BOT_TOKEN" ] && [ -n "$TELEGRAM_CHAT_ID" ]; then
+    export TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID
+    "$NOTIFY_SCRIPT" "$MESSAGE"
+    
+    # Log pentru debugging
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] Notificare trimisă: $JAIL_NAME $ACTION $IP" >> /var/log/fail2ban-telegram.log
+fi
+EOF
+
+    chmod +x "$SCRIPT_DIR/fail2ban-telegram-intelligent.sh"
+
+    # === ACȚIUNE TELEGRAM PENTRU FAIL2BAN ===
+    cat > "$FAIL2BAN_DIR/action.d/telegram-intelligent.conf" << 'EOF'
+[Definition]
+actionstart =
+actionstop =
+actioncheck =
+actionban = /etc/automation-web-hosting/scripts/fail2ban-telegram-intelligent.sh <name> ban <ip> <bantime>
+actionunban = /etc/automation-web-hosting/scripts/fail2ban-telegram-intelligent.sh <name> unban <ip>
+
+[Init]
+EOF
+
+    # === CONFIGURARE JAILS CU NOTIFICĂRI INTELIGENTE ===
+    echo "[*] Actualizez jails cu notificări inteligente..."
+    
+    # Configurație jail.local completă
+    cat > "$FAIL2BAN_DIR/jail.local" << 'EOF'
+[DEFAULT]
+ignoreip = 127.0.0.1/8 ::1
+bantime = 7200
+findtime = 600
+maxretry = 3
+backend = auto
+banaction = iptables-multiport
+
+[sshd]
+enabled = true
+port = ssh
+filter = sshd
+logpath = /var/log/auth.log
+maxretry = 3
+bantime = 7200
+action = %(action_)s
+         telegram-intelligent
+
+[web-attacks]
+enabled = true
+port = http,https
+filter = web-attacks
+logpath = /var/log/nginx/access.log
+          /var/log/apache2/access.log
+maxretry = 3
+bantime = 7200
+action = %(action_)s
+         telegram-intelligent
+
+[auth-attacks]
+enabled = true
+port = http,https,ssh
+filter = auth-attacks
+logpath = /var/log/auth.log
+          /var/log/apache2/error.log
+maxretry = 3
+bantime = 7200
+action = %(action_)s
+         telegram-intelligent
+
+[web-scanners]
+enabled = true
+port = http,https
+filter = web-scanners
+logpath = /var/log/nginx/access.log
+          /var/log/apache2/access.log
+maxretry = 2
+bantime = 10800
+findtime = 300
+action = %(action_)s
+         telegram-intelligent
+
+[server-errors]
+enabled = true
+port = http,https
+filter = server-errors
+logpath = /var/log/nginx/error.log
+          /var/log/apache2/error.log
+maxretry = 5
+bantime = 3600
+findtime = 900
+action = %(action_)s
+         telegram-intelligent
+EOF
+
+    # Configurație behavioral analysis
+    cat > "$FAIL2BAN_DIR/jail.d/behavioral.conf" << 'EOF'
+[behavioral-analysis]
+enabled = true
+port = http,https,ssh
+filter = behavioral-analysis
+logpath = /var/log/nginx/access.log
+         /var/log/apache2/access.log
+         /var/log/auth.log
+maxretry = 15
+findtime = 300
+bantime = 3600
+action = %(action_)s
+         telegram-intelligent
+EOF
+
+    # === CONFIGURARE ESCALATION PENTRU RECIDIVIȘTI ===
+    cat > "$FAIL2BAN_DIR/jail.d/escalation.conf" << 'EOF'
+[escalation-ssh]
+enabled = true
+port = ssh
+filter = sshd
+logpath = /var/log/auth.log
+maxretry = 10
+findtime = 86400
+bantime = 2592000
+action = %(action_)s
+         telegram-intelligent
+
+[escalation-web]
+enabled = true
+port = http,https
+filter = web-attacks
+logpath = /var/log/nginx/access.log
+          /var/log/apache2/access.log
+maxretry = 10
+findtime = 86400
+bantime = 2592000
+action = %(action_)s
+         telegram-intelligent
+
+[escalation-auth]
+enabled = true
+port = http,https,ssh
+filter = auth-attacks
+logpath = /var/log/auth.log
+          /var/log/apache2/error.log
+maxretry = 10
+findtime = 86400
+bantime = 2592000
+action = %(action_)s
+         telegram-intelligent
+EOF
+
+    echo "[+] Sistem notificări inteligente configurat complet"
+}
+
 # === EXECUȚIE PRINCIPALĂ ===
 main() {
     echo "=================================================="
@@ -691,7 +959,9 @@ main() {
     
     # Setup componente de bază
     setup_basic_fail2ban
-    
+    # Setup acțiuni Telegram
+    setup_advanced_telegram_system
+	
     # Setup componente avansate
     setup_backup_system
     setup_threat_intelligence
@@ -699,7 +969,7 @@ main() {
     setup_autohealing
     setup_advanced_reporting
     setup_unified_interface
-    
+
     # Verificare și pornire
     if setup_and_verify_fail2ban; then
         # Verificare finală
