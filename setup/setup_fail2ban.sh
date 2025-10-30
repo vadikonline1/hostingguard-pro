@@ -218,7 +218,7 @@ setup_behavioral_analysis() {
 failregex = ^<HOST> -.*".*" (404|403) .*"$
             ^<HOST> -.*"GET.*(\.php|\.asp|\.jsp).*" (404|403)
             ^<HOST> -.*"POST.*(wp-login|admin|login).*" 200
-            ^<HOST> -.*" (500|502) .*".*"python.*"
+            ^<HOST> -.*" (500|502) .*"".*"python.*"
             ^<HOST> -.*".*" 200.*"curl.*"
             ^<HOST> -.*".*" 200.*"wget.*"
 
@@ -704,9 +704,15 @@ if [ "$ACTION" = "ban" ]; then
     # Analiză threat intelligence
     THREAT_INTEL_DIR="/var/lib/fail2ban/threat-intel"
     IS_KNOWN_THREAT=""
+    BANTIME_DAYS=0
+    
     if [ -f "$THREAT_INTEL_DIR/combined_threats.txt" ]; then
         if grep -q "$IP" "$THREAT_INTEL_DIR/combined_threats.txt" 2>/dev/null; then
             IS_KNOWN_THREAT="🔍 IP cunoscut în liste threat intelligence"
+            # SETEAZĂ BANTIME PE 30 DE ZILE PENTRU IP-URI DIN THREAT INTELLIGENCE
+            BANTIME_DAYS=30
+            BANTIME=$((2592000))  # 30 zile în secunde
+            echo "[*] IP $IP este în IS_KNOWN_THREAT - setez bantime pe 30 de zile"
         fi
     fi
     
@@ -714,7 +720,19 @@ if [ "$ACTION" = "ban" ]; then
     BAN_HISTORY=$(grep -c "Ban $IP" /var/log/fail2ban.log 2>/dev/null || echo 0)
     
     # Determină nivelul de severitate
-    if [ "$BANTIME" -ge 2592000 ]; then
+    if [ "$BANTIME_DAYS" -eq 30 ]; then
+        # BLOCARE 30 ZILE pentru threat intelligence
+        MESSAGE="🚨🚨🚨 THREAT INTELLIGENCE - BLOCARE 30 ZILE 🚨🚨🚨
+Jail: $JAIL_NAME
+IP: $IP
+Server: $SERVER_NAME  
+Timp: $TIMESTAMP
+Durată: 30 ZILE
+Motiv: IP cunoscut în liste amenințări globale
+Blocări anterioare: $BAN_HISTORY
+Status: AMENINȚARE GLOBALĂ DETECTATĂ"
+    
+    elif [ "$BANTIME" -ge 2592000 ]; then
         # ESCALATION - 30 days
         MESSAGE="🚨🚨 ESCALATION FAIL2BAN - BLOCARE 30 ZILE 🚨🚨
 Jail: $JAIL_NAME
@@ -782,7 +800,7 @@ if [ -n "$TELEGRAM_BOT_TOKEN" ] && [ -n "$TELEGRAM_CHAT_ID" ]; then
     "$NOTIFY_SCRIPT" "$MESSAGE"
     
     # Log pentru debugging
-    echo "[$(date '+%Y-%m-%d %H:%M:%S')] Notificare trimisă: $JAIL_NAME $ACTION $IP" >> /var/log/fail2ban-telegram.log
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] Notificare trimisă: $JAIL_NAME $ACTION $IP Bantime: $BANTIME" >> /var/log/fail2ban-telegram.log
 fi
 EOF
 
@@ -886,45 +904,45 @@ action = %(action_)s
          telegram-intelligent
 EOF
 
-    # === CONFIGURARE ESCALATION PENTRU RECIDIVIȘTI ===
-    cat > "$FAIL2BAN_DIR/jail.d/escalation.conf" << 'EOF'
-[escalation-ssh]
+    # === CONFIGURARE ESCALATION PENTRU THREAT INTELLIGENCE ===
+    cat > "$FAIL2BAN_DIR/jail.d/threat-intelligence.conf" << 'EOF'
+[threat-intelligence-ssh]
 enabled = true
 port = ssh
 filter = sshd
 logpath = /var/log/auth.log
-maxretry = 10
-findtime = 86400
+maxretry = 1
+findtime = 600
 bantime = 2592000
 action = %(action_)s
          telegram-intelligent
 
-[escalation-web]
+[threat-intelligence-web]
 enabled = true
 port = http,https
 filter = web-attacks
 logpath = /var/log/nginx/access.log
           /var/log/apache2/access.log
-maxretry = 10
-findtime = 86400
+maxretry = 1
+findtime = 600
 bantime = 2592000
 action = %(action_)s
          telegram-intelligent
 
-[escalation-auth]
+[threat-intelligence-auth]
 enabled = true
 port = http,https,ssh
 filter = auth-attacks
 logpath = /var/log/auth.log
           /var/log/apache2/error.log
-maxretry = 10
-findtime = 86400
+maxretry = 1
+findtime = 600
 bantime = 2592000
 action = %(action_)s
          telegram-intelligent
 EOF
 
-    echo "[+] Sistem notificări inteligente configurat complet"
+    echo "[+] Sistem notificări inteligente configurat complet cu suport threat intelligence"
 }
 
 # === EXECUȚIE PRINCIPALĂ ===
