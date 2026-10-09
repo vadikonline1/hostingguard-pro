@@ -8,6 +8,8 @@
 #   3. stergere din lista threat-intel (altfel escaladarea 30 zile le reprinde)
 #   4. sincronizare in fail2ban ignoreip (cu reload doar cand se schimba ceva)
 # Ruleaza hourly din cron; o rulare tipica = cateva apeluri iptables/socket.
+# SILENTIOS cand nu e nimic de reparat (fara Telegram, fara output in log).
+# Trimite Telegram + scrie in log DOAR cand aplica efectiv o reparatie.
 # Utilizare: whitelist-guard.sh [--status]
 # =============================================================================
 BOUNCER_DIR="/etc/automation-web-hosting"
@@ -53,27 +55,61 @@ jail_list() {
 }
 
 is_banned() {
-    # $1=jail $2=ip → 0 daca e banat. Fallback: unban direct daca interogarea nu e suportata.
-    local banned
-    banned=$(fail2ban-client get "$1" banned 2>/dev/null)
-    if [ $? -ne 0 ]; then
-        return 0
-    fi
-    echo "$banned" | grep -qw "$2"
+    # $1=jail $2=ip → 0 daca e banat.
+    # Folosim `status <jail>` (lista "Banned IP list"), nu `get <jail> banned`,
+    # pentru compatibilitate maxima. NU presupunem "banat" la eroare — altfel
+    # fiecare rulare orara incerca unban + marca CHANGED + trimitea Telegram.
+    local st
+    st=$(fail2ban-client status "$1" 2>/dev/null) || return 1
+    echo "$st" | grep -qw "$2"
 }
 
 # Prima regula din INPUT e ACCEPT-ul nostru? (tolerant la format: -s IP sau -s IP/32)
+# NOTA: iptables -S afiseaza prima linie politica (-P INPUT ...), nu o regula.
+# De aceea o sarim, altfel verificarea pica la fiecare rulare si scriptul
+# raporta "modificare" + Telegram in fiecare ora, chiar si fara schimbari.
+iptables_input_rules() {
+    iptables -S INPUT 2>/dev/null | grep -v '^-P '
+}
+
+# 0 = OK: primele N reguli sunt exact ACCEPT-urile whitelist, in ordine,
+# deasupra oricarui jump f2b-*. Altfel 1 = necesita reparatie.
+# Cu mai multe IP-uri, un singur IP poate fi pe pozitia 1 — vechea verificare
+# per-IP marca CHANGED la fiecare ora (flip-flop). Verificam blocul intreg.
+whitelist_order_ok() {
+    local rules n i line ip
+    rules=$(iptables_input_rules)
+    [ -z "$rules" ] && return 1
+    n=$(echo "$WL" | wc -w)
+    i=0
+    for ip in $WL; do
+        i=$((i + 1))
+        line=$(echo "$rules" | sed -n "${i}p")
+        case "$line" in
+            *"-s $ip"*ACCEPT*|*"--source $ip"*ACCEPT*) ;;
+            *) return 1 ;;
+        esac
+    done
+    return 0
+}
+
+# Compatibilitate: un singur IP pe pozitia 1 (folosit de --status)
 is_top_accept() {
     local first
-    first=$(iptables -S INPUT 2>/dev/null | head -1)
+    first=$(iptables_input_rules | head -1)
     [[ "$first" == *"-s $1"* && "$first" == *"ACCEPT"* ]]
 }
 
 if [ "${1:-}" = "--status" ]; then
     echo "=== WHITELIST STATUS ==="
     echo "Lista: $WL"
+    if whitelist_order_ok; then
+        echo "  Ordine iptables OK: blocul whitelist e deasupra regulilor f2b-*"
+    else
+        echo "  Ordine iptables NU e OK (va fi reparata la urmatoarea rulare)"
+    fi
     for ip in $WL; do
-        if is_top_accept "$ip"; then echo "  $ip: ACCEPT pe pozitia 1 OK"; else echo "  $ip: ACCEPT NU e pe pozitia 1 (va fi reparat la urmatoarea rulare)"; fi
+        if is_top_accept "$ip"; then echo "  $ip: ACCEPT pe pozitia 1 OK"; else echo "  $ip: ACCEPT nu e pe pozitia 1 (normal daca ai mai multe IP-uri — conteaza blocul de mai sus)"; fi
         for j in $(jail_list); do
             if is_banned "$j" "$ip"; then echo "  $ip: BANAT in $j (!!)"; fi
         done
@@ -82,17 +118,34 @@ if [ "${1:-}" = "--status" ]; then
     exit 0
 fi
 
-for ip in $WL; do
-    # 1. ACCEPT pe pozitia 1 (doar daca lipsește sau e deplasat)
-    if ! is_top_accept "$ip"; then
+# 1. ACCEPT-urile whitelist ca BLOC la inceputul INPUT, deasupra jump-urilor
+# f2b-* (o singura reparatie atomica, nu cate una per IP — evita flip-flop-ul
+# orar cu 2+ IP-uri unde fiecare rulare muta alt IP pe pozitia 1).
+if ! whitelist_order_ok; then
+    for ip in $WL; do
+        # sterge duplicatele existente (ambele forme: -s IP si -s IP/32)
         while iptables -D INPUT -s "$ip" -j ACCEPT 2>/dev/null; do :; done
+        while iptables -D INPUT -s "$ip/32" -j ACCEPT 2>/dev/null; do :; done
+    done
+    # reinsereaza in ordine inversa la pozitia 1 → ordinea finala = ordinea WL
+    rev=""
+    for ip in $WL; do rev="$ip $rev"; done
+    repaired=0
+    for ip in $rev; do
         if iptables -I INPUT 1 -s "$ip" -j ACCEPT 2>/dev/null; then
+            repaired=1
+        fi
+    done
+    if [ "$repaired" = "1" ]; then
+        if whitelist_order_ok; then
             CHANGED=1
-            NOTES="$NOTES• ACCEPT $ip mutat pe pozitia 1
+            NOTES="$NOTES• Blocul whitelist ACCEPT reasezat deasupra regulilor f2b-*: $WL
 "
         fi
     fi
+fi
 
+for ip in $WL; do
     # 2. unban din toate jailurile
     for j in $(jail_list); do
         [ -z "$j" ] && continue
@@ -127,11 +180,15 @@ if echo "$NOTES" | grep -q "ignoreip"; then
     fail2ban-client reload >/dev/null 2>&1 || true
 fi
 
-if [ "$CHANGED" = "1" ] && [ -n "$TELEGRAM_BOT_TOKEN" ] && [ -n "$TELEGRAM_CHAT_ID" ]; then
-    MSG="✅ Whitelist guard activ pe $(hostname -f)
+if [ "$CHANGED" = "1" ]; then
+    if [ -n "$TELEGRAM_BOT_TOKEN" ] && [ -n "$TELEGRAM_CHAT_ID" ] && [ "$TELEGRAM_BOT_TOKEN" != "change-me" ]; then
+        MSG="✅ Whitelist guard activ pe $(hostname -f)
 $NOTES"
-    export TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID
-    timeout 15 "$NOTIFY_SCRIPT" "$MSG" >/dev/null 2>&1 || true
+        export TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID
+        timeout 15 "$NOTIFY_SCRIPT" "$MSG" >/dev/null 2>&1 || true
+    fi
+    echo "[+] Whitelist guard: verificat [$WL ] (reparatii aplicate)"
 fi
-
-echo "[+] Whitelist guard: verificat [$WL ]${CHANGED:+ (reparatii aplicate)}"
+# Fara modificari: silentios (exit 0 fara output) — cronul orar nu mai
+# umple logul si nu mai trimite Telegram la fiecare ora.
+exit 0
