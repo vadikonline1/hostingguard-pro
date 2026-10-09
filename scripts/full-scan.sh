@@ -30,10 +30,30 @@ LOG_DIR="${LOG_DIR:-$BOUNCER_DIR/log}"
 NOTIFY_SCRIPT="${NOTIFY_SCRIPT:-$BOUNCER_DIR/telegram_notify.sh}"
 QUARANTINE_DIR="${QUARANTINE_DIR:-/var/quarantine}"
 
-DAILY_SCAN_PATHS="${DAILY_SCAN_PATHS:-/var /etc/nginx /etc/apache2}"
-FULL_SCAN_PATHS="${FULL_SCAN_PATHS:-/var /etc /home /root /opt /usr /tmp}"
+DAILY_SCAN_PATHS="${DAILY_SCAN_PATHS:-/var/www /home /tmp /var/tmp /etc/nginx /etc/apache2}"
+# NU scana /usr, /proc, /sys, /dev, /run, /var/lib/{mysql,docker} — cauza principala a blocarii
+FULL_SCAN_PATHS="${FULL_SCAN_PATHS:-/var/www /home /root /etc /opt /tmp /var/tmp}"
 EXCLUDE_PATHS="${EXCLUDE_PATHS:-*.log *.tmp *.cache *.swp *.swx *.pid *.sock /var/lib/clamav/* /var/quarantine/* /proc/* /sys/* /dev/* /run/*}"
-MAX_FILE_SIZE="${MAX_FILE_SIZE:-100M}"
+MAX_FILE_SIZE="${MAX_FILE_SIZE:-25M}"
+MAX_SCANSIZE="${MAX_SCANSIZE:-50M}"
+ENABLE_MALDET="${ENABLE_MALDET:-1}"
+ENABLE_RKHUNTER="${ENABLE_RKHUNTER:-0}"
+QUARANTINE_MODE="${QUARANTINE_MODE:-safe}"
+
+# Guard-uri comune anti-blocare
+# shellcheck disable=SC1091
+[ -f "$SCRIPT_DIR/common.sh" ] && source "$SCRIPT_DIR/common.sh"
+apply_low_priority 2>/dev/null || true
+acquire_lock "/run/hostingguard-full.lock" || exit 0
+# Nu rula full daca daily tocmai ruleaza (evita suprapunerea de duminica 00:00+01:00)
+if [ -f /run/hostingguard-daily.lock ] && ! flock -n /run/hostingguard-daily.lock true 2>/dev/null; then
+    echo "[!] Daily scan activ — aman full-scanul pentru a nu dubla loadul" >&2
+    exit 0
+fi
+if ! check_load 2>/dev/null; then
+    echo "[!] Full scan amanat: load prea mare." >&2
+    exit 0
+fi
 
 TELEGRAM_BOT_TOKEN="${TELEGRAM_BOT_TOKEN}"
 TELEGRAM_CHAT_ID="${TELEGRAM_CHAT_ID}"
@@ -43,15 +63,15 @@ SCRIPT_NAME=$(basename "$0")
 if [[ "$SCRIPT_NAME" == *"full"* ]] || [[ "$1" == "full" ]]; then
     SCAN_TYPE="full"
     SCAN_PATHS="$FULL_SCAN_PATHS"
-    SCAN_PATHS_DISPLAY="Full System (/var, /etc, /home, /root, /opt, /usr, /tmp)"
-    MALDET_TIMEOUT=14400  # 4 hours for full scan
-    CLAMAV_TIMEOUT=10800  # 3 hours for full scan
+    SCAN_PATHS_DISPLAY="Full System (web/home/etc, fara /usr si DB)"
+    MALDET_TIMEOUT=${MALDET_TIMEOUT_FULL:-5400}
+    CLAMAV_TIMEOUT=${FULL_CLAMAV_TIMEOUT:-5400}
 else
     SCAN_TYPE="daily"
     SCAN_PATHS="$DAILY_SCAN_PATHS"
-    SCAN_PATHS_DISPLAY="Daily Scan (/var, /etc/nginx, /etc/apache2)"
-    MALDET_TIMEOUT=3600   # 1 hour for daily scan
-    CLAMAV_TIMEOUT=1800   # 30 minutes for daily scan
+    SCAN_PATHS_DISPLAY="Daily Scan (web/home/tmp)"
+    MALDET_TIMEOUT=${MALDET_TIMEOUT_DAILY:-1800}
+    CLAMAV_TIMEOUT=${DAILY_CLAMAV_TIMEOUT:-2700}
 fi
 
 # --- INIT LOG & PID ----------------------------------------------------------
@@ -99,11 +119,18 @@ send_telegram_notification() {
     return 1
 }
 
-# --- QUARANTINE FUNCTION -----------------------------------------------------
+# --- QUARANTINE FUNCTION (safe-mode) -----------------------------------------
 quarantine_file() {
     local infected_file="$1"
     local virus_name="$2"
     local scanner="$3"
+
+    if [ "${QUARANTINE_MODE:-safe}" = "safe" ] && type is_system_path >/dev/null 2>&1; then
+        if is_system_path "$infected_file"; then
+            log "ALERT" "SYSTEM PATH threat (NU carantinez, doar raportez): $infected_file ($virus_name)"
+            return 2
+        fi
+    fi
     
     if [ ! -f "$infected_file" ] && [ ! -d "$infected_file" ]; then
         log "WARNING" "File not found for quarantine: $infected_file"
@@ -147,18 +174,8 @@ quarantine_file() {
     fi
 }
 
-# --- CHECK FOR DUPLICATE INSTANCE -------------------------------------------
-if [ -f "$PID_FILE" ]; then
-    OLD_PID=$(cat "$PID_FILE")
-    if kill -0 "$OLD_PID" 2>/dev/null; then
-        log "ERROR" "Another instance is already running (PID: $OLD_PID)"
-        exit 1
-    else
-        log "WARNING" "Stale PID file found, removing..."
-        rm -f "$PID_FILE"
-    fi
-fi
-echo $$ > "$PID_FILE"
+# --- CHECK FOR DUPLICATE INSTANCE (flock activ; PID informativ) ----------------
+echo $$ > "$PID_FILE" 2>/dev/null || true
 
 # --- CLEANUP FUNCTION --------------------------------------------------------
 CLEANUP_DONE=0
@@ -227,13 +244,11 @@ cleanup() {
 
 trap cleanup EXIT INT TERM
 
-# --- VERIFY REQUIRED COMMANDS ------------------------------------------------
-for cmd in clamscan; do
-    if ! command -v "$cmd" >/dev/null 2>&1; then
-        log "ERROR" "$cmd not found. Install: apt-get install clamav"
-        exit 1
-    fi
-done
+# --- VERIFY REQUIRED COMMANDS (clamscan SAU clamdscan) -----------------------
+if ! command -v clamscan >/dev/null 2>&1 && ! command -v clamdscan >/dev/null 2>&1; then
+    log "ERROR" "nici clamscan, nici clamdscan gasit"
+    exit 1
+fi
 
 MALDET_CMD=""
 MALDET_AVAILABLE=0
@@ -269,14 +284,34 @@ run_clamav_scan() {
     local scan_start=$(date +%s)
 
     log "INFO" "=== STARTING CLAMAV DETAILED SCAN ==="
-    
-    # Construim array-ul cu opțiuni pentru scanare
+
+    CLAM_CMD="clamscan"
+    CLAM_IS_DAEMON=0
+    if type pick_clam_cmd >/dev/null 2>&1; then
+        CLAM_CMD=$(pick_clam_cmd 2>/dev/null || echo "clamscan")
+    fi
+    [ "$CLAM_CMD" = "clamdscan" ] && CLAM_IS_DAEMON=1
+    log "INFO" "Clam engine: $CLAM_CMD (daemon=$CLAM_IS_DAEMON)"
+
+    # Limite REALE — inainte --max-scansize=0 (nelimitat) scana arhive de GB si OOM-kill
     local clamav_opts=(
         --recursive
         --infected
         --max-filesize="$MAX_FILE_SIZE"
-        --max-scansize=0
+        --max-scansize="$MAX_SCANSIZE"
+        --max-recursion=10
+        --exclude-dir=^/proc
+        --exclude-dir=^/sys
+        --exclude-dir=^/dev
+        --exclude-dir=^/run
+        --exclude-dir=^/var/lib/mysql
+        --exclude-dir=^/var/lib/docker
+        --exclude-dir=^/var/lib/postgresql
+        --exclude-dir=^/var/lib/clamav
+        --exclude-dir=^/var/spool
+        --exclude-dir=^/var/cache
     )
+    [ "$CLAM_IS_DAEMON" = "1" ] && clamav_opts+=(--multiscan --fdpass)
     
     # Adăugăm exclude patterns în array
     for pattern in $EXCLUDE_PATHS; do
@@ -296,8 +331,12 @@ run_clamav_scan() {
         local path_scanned=0
         local path_quarantined=0
         
-        # Folosim clamscan CU array pentru a evita problemele de quoting
-        output=$(timeout $CLAMAV_TIMEOUT clamscan "${clamav_opts[@]}" "$path" 2>&1) || exit_code=$?
+        # Folosim timeout dur + skip daca loadul sare in timpul scanului
+        output=$(timeout $CLAMAV_TIMEOUT nice -n 19 ionice -c3 "$CLAM_CMD" "${clamav_opts[@]}" "$path" 2>&1) || exit_code=$?
+        if [ "$exit_code" -eq 124 ]; then
+            log "WARNING" "Timeout $path dupa ${CLAMAV_TIMEOUT}s — trec mai departe"
+            continue
+        fi
         
         # Extrage statistici din output - clamscan cu summary
         path_infected=$(echo "$output" | grep "Infected files:" | awk '{print $3}')
@@ -366,6 +405,10 @@ run_clamav_scan() {
 }
 
 run_maldet_scan() {
+    if [ "${ENABLE_MALDET:-1}" = "0" ]; then
+        log "INFO" "Maldet dezactivat (ENABLE_MALDET=0) — skip"
+        return
+    fi
     if [ $MALDET_AVAILABLE -eq 0 ]; then
         return
     fi
@@ -376,10 +419,10 @@ run_maldet_scan() {
     local total_quarantined=0
     local filtered_threat_count=0
     
-    # Rulează scanarea Maldet cu timeout
+    # Rulează scanarea Maldet cu timeout + prioritate scazuta
     log "INFO" "Running maldet scan with timeout: ${MALDET_TIMEOUT}s"
     local maldet_output
-    maldet_output=$(timeout $MALDET_TIMEOUT $MALDET_CMD -a $SCAN_PATHS 2>&1) || true
+    maldet_output=$(timeout $MALDET_TIMEOUT nice -n 19 ionice -c3 $MALDET_CMD -a $SCAN_PATHS 2>&1) || true
     
     local scan_end=$(date +%s)
     local scan_duration=$((scan_end - scan_start))
@@ -446,6 +489,10 @@ run_maldet_scan() {
 }
 
 run_rkhunter_scan() {
+    if [ "${ENABLE_RKHUNTER:-0}" = "0" ]; then
+        log "INFO" "rkhunter dezactivat implicit (ENABLE_RKHUNTER=0) — e foarte greu pe VPS. Activeaza-l doar lunar manual."
+        return
+    fi
     if [ $RKHUNTER_AVAILABLE -eq 0 ] || [ "$SCAN_TYPE" != "full" ]; then
         return
     fi

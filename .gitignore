@@ -1,0 +1,6 @@
+# HostingGuard - fisiere locale care NU se comit
+*.pid
+*.filepart
+log/
+tmp/
+*.tmp

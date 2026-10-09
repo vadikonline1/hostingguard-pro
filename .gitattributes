@@ -1,0 +1,5 @@
+# HostingGuard - forteaza LF pentru scripturi (CRLF rupe bash pe Linux)
+*.sh text eol=lf
+*.env text eol=lf
+.gitattributes text eol=lf
+.gitignore text eol=lf

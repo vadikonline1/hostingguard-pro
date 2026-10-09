@@ -287,7 +287,7 @@ create_systemd_service() {
     
     cat > "$SERVICE_DIR/realtime-monitor.service" << EOF
 [Unit]
-Description=Real-time File System Malware Monitor
+Description=Real-time File System Malware Monitor (low-priority)
 After=network.target clamav-daemon.service
 Requires=clamav-daemon.service
 
@@ -295,8 +295,13 @@ Requires=clamav-daemon.service
 Type=simple
 ExecStart=$realtime_script
 Restart=always
-RestartSec=10
+RestartSec=30
 User=root
+# Limite anti-blocare: max 30% CPU, 300M RAM, IO/CPU minime
+CPUQuota=30%
+MemoryMax=300M
+Nice=19
+IOSchedulingClass=idle
 StandardOutput=journal
 StandardError=journal
 
@@ -315,42 +320,28 @@ EOF
 }
 
 setup_cron_jobs() {
-    echo "[*] Setting up cron jobs..."
-    
-    # Folosește căile din variabilele de environment pentru scripturi
+    echo "[*] Setting up OPTIMIZED cron jobs (staggered, low priority)..."
+
     local daily_script="${DAILY_SCAN_SCRIPT:-$SCRIPT_DIR/daily-scan.sh}"
     local full_script="${FULL_SCAN_SCRIPT:-$SCRIPT_DIR/full-scan.sh}"
-    
-    # Verifică dacă scripturile există
-    local scripts_missing=0
-    if [ ! -f "$daily_script" ]; then
-        echo "⚠️ Daily scan script not found: $daily_script"
-        scripts_missing=1
-    fi
-    if [ ! -f "$full_script" ]; then
-        echo "⚠️ Full scan script not found: $full_script"
-        scripts_missing=1
-    fi
-    
-    if [ $scripts_missing -eq 1 ]; then
-        echo "⚠️ Cron jobs will be set up but won't work until scripts are created"
-    fi
-    
-    # Curăță intrările anterioare pentru aceste scripturi
-    (crontab -l 2>/dev/null | grep -v "$daily_script" | grep -v "$full_script" | grep -v "system_scan") | crontab - || true
-    
-    # Scanare zilnică la 00:00
-    (crontab -l 2>/dev/null; echo "0 0 * * * $daily_script >> $LOG_DIR/daily-cron.log 2>&1") | crontab -
-    
-    # Scanare completă sâmbăta la 01:00
-    (crontab -l 2>/dev/null; echo "0 1 * * 6 $full_script >> $LOG_DIR/full-cron.log 2>&1") | crontab -
-    
-    # Actualizări zilnice la 04:00
-    (crontab -l 2>/dev/null; echo "0 4 * * * /usr/bin/freshclam --quiet") | crontab -
-    (crontab -l 2>/dev/null; echo "0 5 * * 1 /usr/local/maldetect/maldet -u > /dev/null 2>&1") | crontab -
-    (crontab -l 2>/dev/null; echo "0 6 * * * /usr/bin/rkhunter --update --propupd > /dev/null 2>&1") | crontab -
-    
-    echo "✅ Cron jobs set up successfully"
+
+    local tmpcron
+    tmpcron=$(mktemp)
+    # Curata intrarile vechi (gramada 00:00/04:00/05:00/06:00)
+    (crontab -l 2>/dev/null | grep -v "$daily_script" | grep -v "$full_script" | grep -v "system_scan" \
+        | grep -v "freshclam" | grep -v "maldet -u" | grep -v "rkhunter --update") > "$tmpcron" || true
+
+    cat >> "$tmpcron" << EOF
+
+# HOSTINGGUARD OPTIMIZED (vezi scripts/crontab.optimized)
+30 2 * * * /usr/bin/flock -n /run/hg-cron-daily.lock /usr/bin/nice -n 19 /usr/bin/ionice -c3 $daily_script >> $LOG_DIR/daily-cron.log 2>&1
+0 4 1-7 * 0 /usr/bin/flock -n /run/hg-cron-full.lock /usr/bin/nice -n 19 /usr/bin/ionice -c3 $full_script >> $LOG_DIR/full-cron.log 2>&1
+15 5 1-7 * 1 /usr/bin/nice -n 19 /usr/bin/ionice -c3 /usr/local/maldetect/maldet -u > /dev/null 2>&1
+EOF
+    crontab "$tmpcron"
+    rm -f "$tmpcron"
+
+    echo "✅ Cron jobs set up (daily 02:30, full LUNAR, fara freshclam/rkhunter in cron)"
 }
 
 start_services() {

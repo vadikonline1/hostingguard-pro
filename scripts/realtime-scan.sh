@@ -21,6 +21,12 @@ fi
 # === CONFIG ===
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
+# Guard-uri comune
+COMMON_LIB="$(dirname "$0")/common.sh"
+[ -f "$COMMON_LIB" ] && source "$COMMON_LIB"
+apply_low_priority 2>/dev/null || true
+acquire_lock "/run/hostingguard-realtime.lock" || exit 0
+
 # Configurații cu valori din .env sau fallback
 BOUNCER_DIR="${BOUNCER_DIR:-/etc/automation-web-hosting}"
 SCRIPT_DIR="${SCRIPT_DIR:-$BOUNCER_DIR/scripts}"
@@ -31,9 +37,11 @@ PID_FILE="${PID_FILE:-$BOUNCER_DIR/clamav-monitor.pid}"
 QUARANTINE_DIR="${QUARANTINE_DIR:-/var/quarantine}"
 
 # Configurații pentru scanare
-REALTIME_SCAN_PATHS="${REALTIME_SCAN_PATHS:-/var/www /etc/nginx /etc/apache2 /var/tmp /var/upload /var/backups}"
+REALTIME_SCAN_PATHS="${REALTIME_SCAN_PATHS:-/var/www /etc/nginx /etc/apache2 /tmp /var/tmp}"
 EXCLUDE_PATHS="${EXCLUDE_PATHS:-*.log *.tmp *.cache *.swp *.swx *.pid *.sock}"
 MAX_FILE_SIZE="${MAX_FILE_SIZE:-25M}"
+REALTIME_MAX_PARALLEL="${REALTIME_MAX_PARALLEL:-2}"
+REALTIME_COOLDOWN="${REALTIME_COOLDOWN:-120}"
 
 # Configurații Telegram (obligatorii)
 TELEGRAM_BOT_TOKEN="${TELEGRAM_BOT_TOKEN}"
@@ -46,7 +54,8 @@ EXCLUDED_EVENTS_COUNT=0
 LAST_EXCLUDED_LOG=0
 EXCLUDED_LOG_INTERVAL=300
 RECENTLY_PROCESSED_DIR="/tmp/clamav_processed"
-RECENTLY_PROCESSED_TIMEOUT=300  # 5 minute
+# Cooldown configurabil din env (default 120s, inainte fix 300s)
+RECENTLY_PROCESSED_TIMEOUT=${REALTIME_COOLDOWN:-120}
 
 # === FUNCTIE LOG ===
 log() {
@@ -192,16 +201,25 @@ send_telegram_notification() {
     return 1
 }
 
-# === VERIFICARE COMENZI ===
-for cmd in inotifywait clamscan; do
-    if ! command -v "$cmd" >/dev/null 2>&1; then
-        log "ERROR" "$cmd not found. Please install: apt-get install ${cmd%-wait}"
-        exit 1
-    fi
-done
+# === VERIFICARE COMENZI (accepta clamdscan ca alternativa usoara) ===
+if ! command -v inotifywait >/dev/null 2>&1; then
+    log "ERROR" "inotifywait not found. Instaleaza: apt-get install inotify-tools"
+    exit 1
+fi
+if ! command -v clamscan >/dev/null 2>&1 && ! command -v clamdscan >/dev/null 2>&1; then
+    log "ERROR" "nici clamscan, nici clamdscan gasit"
+    exit 1
+fi
 
 INOTIFYWAIT_CMD=$(command -v inotifywait)
-CLAMSCAN_CMD=$(command -v clamscan)
+# Prefer daemonul: 1 fork clamscan = ~200MB RAM; clamdscan refoloseste daemonul
+CLAMSCAN_CMD=$(command -v clamdscan 2>/dev/null || command -v clamscan)
+if [ "$(basename "$CLAMSCAN_CMD")" = "clamdscan" ]; then
+    CLAMSCAN_OPTS="--fdpass --no-summary"
+    log "INFO" "Folosesc clamdscan (daemon, usor pe RAM)"
+else
+    CLAMSCAN_OPTS="--no-summary --infected --max-filesize=$MAX_FILE_SIZE --max-scansize=50M"
+fi
 
 log "INFO" "Tools verified: inotifywait=$INOTIFYWAIT_CMD, clamscan=$CLAMSCAN_CMD"
 
@@ -234,7 +252,7 @@ for path in $MONITOR_PATHS; do
     fi
 done
 
-# === FUNCTIE VERIFICARE EXCLUDE ===
+# === FUNCTIE VERIFICARE EXCLUDE (extinsa: sare peste cache/log/session) ===
 should_exclude() {
     local file_path="$1"
     local filename=$(basename "$file_path")
@@ -243,6 +261,12 @@ should_exclude() {
     if [[ "$file_path" == "$LOG_FILE" ]] || [[ "$file_path" == /var/www/fastuser/data/clam_log/* ]]; then
         return 0  # true - exclude fișierul de log
     fi
+
+    # Exclude cai zgomotoase care genereaza furtuna de evenimente (session/cache)
+    case "$file_path" in
+        */cache/*|*/tmp/*sess*|*/sessions/*|*.log|*.tmp|*.cache|\
+        /var/tmp/*|/tmp/*|*/node_modules/*|*/.git/*) return 0 ;;
+    esac
     
     # Exclude based on patterns
     for pattern in $EXCLUDE_PATHS; do
@@ -379,8 +403,8 @@ scan_file() {
     local output
     local exit_code=0
     
-    # Folosește timeout pentru scanare
-    output=$(timeout 30s $CLAMSCAN_CMD --no-summary --infected "$file_path" 2>&1) || exit_code=$?
+    # Scanare cu timeout + prioritate scazuta (nu fura CPU de la php/mysql)
+    output=$(timeout 60s nice -n 19 ionice -c3 $CLAMSCAN_CMD $CLAMSCAN_OPTS "$file_path" 2>&1) || exit_code=$?
     
     # Analizează rezultatul
     case $exit_code in
@@ -459,9 +483,9 @@ fi
 # === MAIN MONITOR LOOP ===
 log "INFO" "=== Starting enhanced monitor loop ==="
 
-# Test inotifywait cu mai multe evenimente
-log "INFO" "Testing inotifywait with more events..."
-if timeout 10s $INOTIFYWAIT_CMD -r -e create,modify,close_write,moved_to --format '%w%f' "/tmp" 2>&1 | head -3 >/dev/null; then
+# Test inotifywait (fara modify)
+log "INFO" "Testing inotifywait..."
+if timeout 10s $INOTIFYWAIT_CMD -e close_write,create --format '%w%f' "/tmp" 2>&1 | head -3 >/dev/null; then
     log "INFO" "inotifywait test successful"
 else
     log "ERROR" "inotifywait test failed"
@@ -470,37 +494,44 @@ fi
 
 log "INFO" "=== Starting continuous monitoring ==="
 
-# Rulează inotifywait cu mai multe evenimente
-log "INFO" "Starting inotifywait with events: create,modify,close_write,moved_to"
+# Rulează inotifywait FARA evenimentul 'modify' (acesta declansa furtuni de
+# scanari la fiecare byte scris — cauza principala a loadului 100%).
+# close_write + moved_to + create sunt suficiente pentru malware-upload.
+log "INFO" "Starting inotifywait with events: close_write,moved_to,create (fara modify)"
 log "INFO" "Excluding log file: $LOG_FILE"
-log "INFO" "Excluding entire log folder: /var/www/fastuser/data/clam_log/*"
+log "INFO" "Max parallel scans: $REALTIME_MAX_PARALLEL"
 
-$INOTIFYWAIT_CMD -m -r -e create,modify,close_write,moved_to --format '%w%f' \
+$INOTIFYWAIT_CMD -m -r -e close_write,moved_to,create --exclude '(.*\.log|.*\.tmp|.*\.cache|.*/cache/.*)' --format '%w%f' \
     $MONITOR_PATHS 2>> "$LOG_FILE" | while read -r file_path; do
-    
+
+    # Sari peste scanare daca loadul e deja critic (protejeaza php/mysql)
+    if type check_load >/dev/null 2>&1 && ! check_load >/dev/null 2>&1; then
+        log "DEBUG" "Load mare — sar peste: $file_path"
+        continue
+    fi
+
     # Verifică dacă fișierul trebuie exclus (inclusiv fișierul de log)
     if should_exclude "$file_path"; then
         log_debug_excluded "$file_path"
         continue
     fi
-    
+
     # Loghează doar evenimentele care nu sunt excluse
     log "INFO" "🎯 INOTIFY EVENT: $file_path"
-    
-    # Folosim o variabilă simplă pentru a număra joburile background
+
+    # Max paralel configurabil (inainte fix 5 x clamscan ~1GB RAM)
     background_jobs=$(jobs -r | wc -l)
-    if [ "$background_jobs" -lt 5 ]; then
+    if [ "$background_jobs" -lt "$REALTIME_MAX_PARALLEL" ]; then
         scan_file "$file_path" &
     else
-        # Dacă sunt prea multe procese, așteaptă
-        log "DEBUG" "Too many scan jobs ($background_jobs), waiting..."
-        wait
+        # Coada plina: asteapta un slot in loc sa fork-uiesti la infinit
+        wait -n 2>/dev/null || wait
         scan_file "$file_path" &
     fi
-    
+
     # Limită rate-ul de scanare
-    sleep 0.1
-    
+    sleep 0.3
+
 done
 
 log "INFO" "=== Monitor loop ended ==="

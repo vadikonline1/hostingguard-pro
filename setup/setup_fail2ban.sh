@@ -252,7 +252,15 @@ EOF
 # === SISTEM DE BACKUP AUTOMAT ===
 setup_backup_system() {
     echo "[*] Configurare sistem backup automat..."
-    
+
+    # NU suprascrie varianta optimizata (are markerul versiune usoara)
+    if grep -q "versiune usoara" "$SCRIPT_DIR/fail2ban-backup.sh" 2>/dev/null; then
+        echo "[+] Backup script optimizat deja prezent — pastrez varianta usoara"
+        mkdir -p "$BACKUP_DIR"
+        (crontab -l 2>/dev/null | grep -v "fail2ban-backup.sh"; echo "5 2 * * * /usr/bin/flock -n /run/hg-cron-backup.lock /usr/bin/nice -n 19 /usr/bin/ionice -c3 $SCRIPT_DIR/fail2ban-backup.sh") | crontab -
+        echo "[+] Sistem backup configurat (backup zilnic 02:05, low-priority)"
+        return 0
+    fi
     mkdir -p "$BACKUP_DIR"
     
     # Script de backup
@@ -310,9 +318,9 @@ fi
 EOF
 
     chmod +x "$SCRIPT_DIR/fail2ban-backup.sh"
-    
-    # Adaugă în crontab - backup zilnic la 2 AM
-    (crontab -l 2>/dev/null | grep -v "fail2ban-backup.sh"; echo "0 2 * * * $SCRIPT_DIR/fail2ban-backup.sh") | crontab -
+
+    # Backup zilnic 02:05 esalonat, prioritate minima (inainte 02:00 fix peste altele)
+    (crontab -l 2>/dev/null | grep -v "fail2ban-backup.sh"; echo "5 2 * * * /usr/bin/flock -n /run/hg-cron-backup.lock /usr/bin/nice -n 19 /usr/bin/ionice -c3 $SCRIPT_DIR/fail2ban-backup.sh") | crontab -
     
     echo "[+] Sistem backup configurat (backup zilnic la 2 AM)"
 }
@@ -320,7 +328,14 @@ EOF
 # === THREAT INTELLIGENCE INTEGRATION ===
 setup_threat_intelligence() {
     echo "[*] Configurare Threat Intelligence..."
-    
+
+    if grep -q "versiune usoara" "$SCRIPT_DIR/update-threat-intel.sh" 2>/dev/null; then
+        echo "[+] Threat-intel optimizat deja prezent — pastrez varianta usoara"
+        mkdir -p "$THREAT_INTEL_DIR"
+        (crontab -l 2>/dev/null | grep -v "update-threat-intel.sh"; echo "0 3 * * 0 /usr/bin/flock -n /run/hg-cron-threat.lock /usr/bin/nice -n 19 /usr/bin/ionice -c3 $SCRIPT_DIR/update-threat-intel.sh") | crontab -
+        echo "[+] Threat Intelligence configurat (saptamanal duminica 03:00)"
+        return 0
+    fi
     mkdir -p "$THREAT_INTEL_DIR"
     
     # Script pentru descărcare liste de amenințări
@@ -373,9 +388,9 @@ EOF
     
     # Rulează prima actualizare
     $SCRIPT_DIR/update-threat-intel.sh
-    
-    # Programează actualizări zilnice
-    (crontab -l 2>/dev/null | grep -v "update-threat-intel.sh"; echo "0 3 * * * $SCRIPT_DIR/update-threat-intel.sh") | crontab -
+
+    # Actualizare SAPTAMANALA duminica 03:00 (inainte zilnic — banda/RAM irosita)
+    (crontab -l 2>/dev/null | grep -v "update-threat-intel.sh"; echo "0 3 * * 0 /usr/bin/flock -n /run/hg-cron-threat.lock /usr/bin/nice -n 19 /usr/bin/ionice -c3 $SCRIPT_DIR/update-threat-intel.sh") | crontab -
     
     echo "[+] Threat Intelligence configurat (actualizare zilnică la 3 AM)"
 }
@@ -383,7 +398,14 @@ EOF
 # === AUTO-HEALING SYSTEM ===
 setup_autohealing() {
     echo "[*] Configurare sistem Auto-Healing..."
-    
+
+    if grep -q "versiune usoara" "$AUTO_HEAL_SCRIPT" 2>/dev/null; then
+        echo "[+] Autoheal optimizat deja prezent — pastrez varianta usoara"
+        chmod +x "$AUTO_HEAL_SCRIPT"
+        (crontab -l 2>/dev/null | grep -v "fail2ban_autoheal.sh"; echo "*/15 * * * * /usr/bin/flock -n /run/hg-cron-heal.lock $AUTO_HEAL_SCRIPT") | crontab -
+        echo "[+] Sistem Auto-Healing configurat (15 min, cu cooldown alerte)"
+        return 0
+    fi
     cat > "$AUTO_HEAL_SCRIPT" << 'EOF'
 #!/bin/bash
 BOUNCER_DIR="/etc/automation-web-hosting"
@@ -432,9 +454,9 @@ echo "[+] Auto-healing verificare completă"
 EOF
 
     chmod +x "$AUTO_HEAL_SCRIPT"
-    
-    # Adaugă în crontab - verificare la fiecare 5 minute
-    (crontab -l 2>/dev/null | grep -v "fail2ban_autoheal.sh"; echo "*/5 * * * * $AUTO_HEAL_SCRIPT") | crontab -
+
+    # Verificare la 15 MINUTE cu flock (inainte la 5 min fara lock = treziri/spam)
+    (crontab -l 2>/dev/null | grep -v "fail2ban_autoheal.sh"; echo "*/15 * * * * /usr/bin/flock -n /run/hg-cron-heal.lock $AUTO_HEAL_SCRIPT") | crontab -
     
     echo "[+] Sistem Auto-Healing configurat"
 }

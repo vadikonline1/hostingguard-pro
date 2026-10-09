@@ -1,0 +1,35 @@
+# =============================================================================
+# HostingGuard - CRONTAB OPTIMIZAT (anti-blocare VPS)
+# Principii: esalonat (fara gramada la 00:00), nice+ionice, flock anti-dublare,
+# full lunar (nu saptamanal), threat saptamanal (nu zilnic), autoheal la 15min.
+# Instalare: crontab -l | grep -v automation-web-hosting ; cat crontab.optimized | crontab -
+# =============================================================================
+
+# Fail2Ban backup zilnic 02:05 (inainte de scanari, rapid cu gzip -1)
+5 2 * * * /usr/bin/flock -n /run/hg-cron-backup.lock /usr/bin/nice -n 19 /usr/bin/ionice -c3 /etc/automation-web-hosting/scripts/fail2ban-backup.sh >> /etc/automation-web-hosting/log/cron-backup.log 2>&1
+
+# Daily quick scan 02:30 (NU la 00:00 odata cu logrotate; doar web/home/tmp)
+30 2 * * * /usr/bin/flock -n /run/hg-cron-daily.lock /usr/bin/nice -n 19 /usr/bin/ionice -c3 /etc/automation-web-hosting/scripts/daily-scan.sh >> /etc/automation-web-hosting/log/daily-scan.log 2>&1
+
+# Threat intel SAPTAMANAL duminica 03:00 (inainte descarca zilnic 3 liste = RAM/banda irosita)
+0 3 * * 0 /usr/bin/flock -n /run/hg-cron-threat.lock /usr/bin/nice -n 19 /usr/bin/ionice -c3 /etc/automation-web-hosting/scripts/update-threat-intel.sh >> /etc/automation-web-hosting/log/threat-intel.log 2>&1
+
+# Full scan LUNAR prima duminica 04:00 (inainte saptamanal peste /usr = ore de 100% CPU)
+0 4 1-7 * 0 /usr/bin/flock -n /run/hg-cron-full.lock /usr/bin/nice -n 19 /usr/bin/ionice -c3 /etc/automation-web-hosting/scripts/full-scan.sh >> /etc/automation-web-hosting/log/full-scan.log 2>&1
+
+# Maldet signatures lunar (lunea primei saptamani, 05:15, prioritate minima)
+15 5 1-7 * 1 /usr/bin/nice -n 19 /usr/bin/ionice -c3 /usr/local/maldetect/maldet -u >> /etc/automation-web-hosting/log/maldet-update.log 2>&1
+
+# rkhunter update LUNAR (inainte zilnic --propupd = rescana tot + warnings false)
+# 30 5 1-7 * 1 /usr/bin/nice -n 19 /usr/bin/ionice -c3 /usr/bin/rkhunter --update --propupd --rwo >> /etc/automation-web-hosting/log/rkhunter.log 2>&1
+
+# NOTA: freshclam NU mai e in cron — e gestionat de serviciul clamav-freshclam
+# (cron + daemon simultan = lock DB + restarturi care intrerup scanarile).
+# Daca NU ai daemonul activ, decomenteaza linia urmatoare:
+# 0 6 * * * /usr/bin/flock -n /run/hg-cron-fresh.lock /usr/bin/freshclam --quiet >> /etc/automation-web-hosting/log/freshclam.log 2>&1
+
+# Auto-healing la 15 MINUTE (inainte la 5 min = treziri + restarturi + spam Telegram)
+*/15 * * * * /usr/bin/flock -n /run/hg-cron-heal.lock /etc/automation-web-hosting/scripts/fail2ban_autoheal.sh >> /etc/automation-web-hosting/log/autoheal.log 2>&1
+
+# Raport zilnic 08:00 (ieftin, il pastram)
+0 8 * * * /usr/bin/flock -n /run/hg-cron-report.lock /etc/automation-web-hosting/scripts/fail2ban-report.sh daily >> /etc/automation-web-hosting/log/report.log 2>&1

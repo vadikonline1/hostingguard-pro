@@ -224,39 +224,50 @@ main_installation() {
 
 #!/bin/bash
 
-# === CONFIGURARE CRON JOBS - VERSIUNE SIMPLĂ ===
+# === CONFIGURARE CRON JOBS - VERSIUNE OPTIMIZATA (esalonat, anti-blocare) ===
 setup_cron_jobs_simple() {
-    echo "[*] Setting up automated scan cron jobs..."
-    
-    # Directorul principal
+    echo "[*] Setting up OPTIMIZED scan cron jobs (staggered, low-priority)..."
+
     SCRIPT_DIR="/etc/automation-web-hosting"
     LOG_DIR="/etc/automation-web-hosting/log"
-    
-    # Asigură-te că directorul de log-uri există
     mkdir -p "$LOG_DIR"
-    
-    # Creează job-urile cron
-    (crontab -l 2>/dev/null | grep -v "daily-scan.sh" | grep -v "full-scan.sh"; cat << EOF
+
+    # Sterge gramada veche de la 00:00/01:00/04:00/05:00/06:00 + autoheal la 5min
+    local tmpcron
+    tmpcron=$(mktemp)
+    crontab -l 2>/dev/null | grep -v "daily-scan.sh" | grep -v "full-scan.sh" \
+        | grep -v "clamav-daily" | grep -v "freshclam" | grep -v "maldet -u" \
+        | grep -v "rkhunter --update" | grep -v "fail2ban-backup.sh" \
+        | grep -v "update-threat-intel.sh" | grep -v "fail2ban_autoheal" \
+        | grep -v "fail2ban-report.sh" > "$tmpcron" || true
+
+    cat >> "$tmpcron" << EOF
 
 # ===========================================
-# HOSTING AUTOMATION - SECURITY SCANS
+# HOSTINGGUARD - OPTIMIZED SCHEDULE (nu modifica manual, ruleaza setup)
+# esalonat + nice/ionice + flock — NU mai pune totul la 00:00
 # ===========================================
-# Daily quick scan - every day at 00:00
-0 0 * * * $SCRIPT_DIR/daily-scan.sh >> $LOG_DIR/daily-scan.log 2>&1
-
-# Weekly full scan - every Sunday at 01:00  
-0 1 * * 0 $SCRIPT_DIR/full-scan.sh >> $LOG_DIR/full-scan.log 2>&1
+5 2 * * * /usr/bin/flock -n /run/hg-cron-backup.lock /usr/bin/nice -n 19 /usr/bin/ionice -c3 $SCRIPT_DIR/scripts/fail2ban-backup.sh >> $LOG_DIR/cron-backup.log 2>&1
+30 2 * * * /usr/bin/flock -n /run/hg-cron-daily.lock /usr/bin/nice -n 19 /usr/bin/ionice -c3 $SCRIPT_DIR/scripts/daily-scan.sh >> $LOG_DIR/daily-scan.log 2>&1
+0 3 * * 0 /usr/bin/flock -n /run/hg-cron-threat.lock /usr/bin/nice -n 19 /usr/bin/ionice -c3 $SCRIPT_DIR/scripts/update-threat-intel.sh >> $LOG_DIR/threat-intel.log 2>&1
+0 4 1-7 * 0 /usr/bin/flock -n /run/hg-cron-full.lock /usr/bin/nice -n 19 /usr/bin/ionice -c3 $SCRIPT_DIR/scripts/full-scan.sh >> $LOG_DIR/full-scan.log 2>&1
+15 5 1-7 * 1 /usr/bin/nice -n 19 /usr/bin/ionice -c3 /usr/local/maldetect/maldet -u >> $LOG_DIR/maldet-update.log 2>&1
+*/15 * * * * /usr/bin/flock -n /run/hg-cron-heal.lock $SCRIPT_DIR/scripts/fail2ban_autoheal.sh >> $LOG_DIR/autoheal.log 2>&1
+0 8 * * * /usr/bin/flock -n /run/hg-cron-report.lock $SCRIPT_DIR/scripts/fail2ban-report.sh daily >> $LOG_DIR/report.log 2>&1
+# NOTA: freshclam e gestionat de daemon (clamav-freshclam), NU din cron.
+# rkhunter --propupd e dezactivat implicit (ENABLE_RKHUNTER=0) — prea greu pe VPS.
 # ===========================================
 EOF
-    ) | crontab -
-    
-    echo "[+] Cron jobs installed successfully"
-    echo "    ✅ Daily scan: 00:00 every day"
-    echo "    ✅ Full scan: 01:00 every Sunday"
-    
-    # Afișează job-urile adăugate
-    echo "[*] Current cron jobs for hosting automation:"
-    crontab -l | grep -A5 -B5 "HOSTING AUTOMATION"
+    crontab "$tmpcron"
+    rm -f "$tmpcron"
+
+    echo "[+] Cron jobs OPTIMIZED installed:"
+    echo "    backup zilnic:      02:05"
+    echo "    daily scan:         02:30 (doar web/home/tmp, nice 19)"
+    echo "    threat intel:       duminica 03:00 (saptamanal, nu zilnic)"
+    echo "    full scan:          prima duminica 04:00 (LUNAR, nu saptamanal)"
+    echo "    autoheal:           la 15 min (nu 5)"
+    crontab -l | grep -A20 "HOSTINGGUARD - OPTIMIZED" || true
 }
 
 # Final configuration and startup
