@@ -29,6 +29,10 @@ fi
 
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
+# Libraria comuna: multi-OS (apt/dnf) + normalize_whitelist
+# shellcheck disable=SC1091
+[ -f "$SCRIPT_DIR/common.sh" ] && source "$SCRIPT_DIR/common.sh"
+
 # === FUNCȚII AVANSATE ===
 
 install_fail2ban() {
@@ -37,8 +41,14 @@ install_fail2ban() {
         echo "[+] Fail2Ban este deja instalat"
         return
     fi
-    echo "[*] Instalez Fail2Ban..."
-    apt-get update && apt-get install -y fail2ban whois python3 python3-pip
+    echo "[*] Instalez Fail2Ban (apt sau dnf + EPEL)..."
+    if type pkg_install >/dev/null 2>&1; then
+        pkg_install fail2ban whois python3 python3-pip
+    elif command -v apt-get >/dev/null 2>&1; then
+        apt-get update && apt-get install -y fail2ban whois python3 python3-pip
+    else
+        dnf install -y epel-release && dnf install -y fail2ban whois python3 python3-pip
+    fi
     echo "[+] Fail2Ban instalat"
 }
 
@@ -49,15 +59,30 @@ check_dependencies() {
     # Instalare dependințe Python pentru Threat Intelligence
     pip3 install requests beautifulsoup4 2>/dev/null || {
         echo "[*] Instalez dependințe Python..."
-        apt-get install -y python3-requests python3-bs4
-    }
-    
-    for cmd in ip iptables curl jq whois ipset; do
-        if ! command -v "$cmd" >/dev/null 2>&1; then
-            echo "[*] Instalez $cmd..."
-            apt-get install -y "$cmd"
+        if type pkg_install >/dev/null 2>&1; then
+            pkg_install python3-requests python3-bs4 || pip3 install requests beautifulsoup4
+        elif command -v apt-get >/dev/null 2>&1; then
+            apt-get install -y python3-requests python3-bs4
+        else
+            dnf install -y python3-requests python3-beautifulsoup4
         fi
-    done
+    }
+
+    # Pachete sistem (nume Debian; maparea pe RHEL e automata: ip→iproute etc.)
+    if type pkg_install >/dev/null 2>&1; then
+        pkg_install ip iptables curl jq whois ipset
+    else
+        for cmd in ip iptables curl jq whois ipset; do
+            if ! command -v "$cmd" >/dev/null 2>&1; then
+                echo "[*] Instalez $cmd..."
+                if command -v apt-get >/dev/null 2>&1; then
+                    apt-get install -y "$cmd"
+                else
+                    dnf install -y "$cmd" || yum install -y "$cmd"
+                fi
+            fi
+        done
+    fi
     
     # Verifică scriptul Telegram
     if [ ! -f "$NOTIFY_SCRIPT" ]; then
@@ -1017,8 +1042,9 @@ apply_banaction_and_whitelist() {
     sed -i "s|^banaction = .*|banaction = $banaction|" "$FAIL2BAN_DIR/jail.local"
 
     # whitelist din hosting.env → fail2ban ignoreip (altfel propriul IP e banat)
+    # Lista e cu virgula: "1.2.3.4,5.6.7.8" (spatiile sunt tolerate)
     local wl
-    wl=$(echo "${WHITELIST_IPS:-}" | tr ' ' '\n' | grep -v change-me | grep -v '^$' | tr '\n' ' ')
+    wl=$(echo "${WHITELIST_IPS:-}" | tr ',' ' ' | tr ' ' '\n' | grep -v change-me | grep -v '^$' | tr '\n' ' ')
     if [ -n "$(echo "$wl" | tr -d ' ')" ]; then
         for ip in $wl; do
             if ! grep -q "$ip" "$FAIL2BAN_DIR/jail.local"; then

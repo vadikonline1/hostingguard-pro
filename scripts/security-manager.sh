@@ -34,23 +34,35 @@ case "$1" in
             echo "Utilizare: $0 whitelist-add <IP>"
             exit 1
         fi
-        if ! [[ "$2" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]]; then
-            echo "[-] IP invalid: $2"
+        # accepta "1.2.3.4" sau "1.2.3.4,5.6.7.8"; normalizeaza la format cu virgula
+        newips=$(echo "$2" | tr ' ' ',')
+        valid=""
+        for nip in $(echo "$newips" | tr ',' ' '); do
+            if [[ "$nip" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]]; then
+                valid="$valid,$nip"
+            else
+                echo "[-] IP invalid (ignorat): $nip"
+            fi
+        done
+        valid=$(echo "$valid" | sed 's/^,//')
+        if [ -z "$valid" ]; then
+            echo "[-] Niciun IP valid"
             exit 1
         fi
         if grep -q "^WHITELIST_IPS=" "$ENV_FILE" 2>/dev/null; then
-            if grep -q "$2" "$ENV_FILE"; then
-                echo "[+] $2 e deja in whitelist"
-            elif grep -q 'WHITELIST_IPS="change-me"' "$ENV_FILE"; then
-                sed -i "s|^WHITELIST_IPS=.*|WHITELIST_IPS=\"$2\"|" "$ENV_FILE"
-                echo "[+] $2 adaugat in whitelist"
+            current=$(grep "^WHITELIST_IPS=" "$ENV_FILE" | cut -d'"' -f2)
+            if [ "$current" = "change-me" ] || [ -z "$current" ]; then
+                merged="$valid"
             else
-                sed -i "s|^WHITELIST_IPS=\"\(.*\)\"|WHITELIST_IPS=\"\1 $2\"|" "$ENV_FILE"
-                echo "[+] $2 adaugat in whitelist"
+                merged="$current,$valid"
             fi
+            # normalizeaza: virgule, fara duplicate/spatii goale
+            merged=$(echo "$merged" | tr ' ' ',' | tr ',' '\n' | grep -v '^$' | sort -u | paste -sd, -)
+            sed -i "s|^WHITELIST_IPS=.*|WHITELIST_IPS=\"$merged\"|" "$ENV_FILE"
+            echo "[+] Whitelist acum: $merged"
         else
-            echo "WHITELIST_IPS=\"$2\"" >> "$ENV_FILE"
-            echo "[+] $2 adaugat in whitelist"
+            echo "WHITELIST_IPS=\"$valid\"" >> "$ENV_FILE"
+            echo "[+] $valid adaugat in whitelist"
         fi
         echo "[*] Aplic protectia acum..."
         "$SCRIPT_DIR/whitelist-guard.sh"

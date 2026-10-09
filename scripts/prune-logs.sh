@@ -16,7 +16,7 @@ if [ -f "$BOUNCER_DIR/hosting.env" ]; then
 fi
 COMMON_LIB="$BOUNCER_DIR/scripts/common.sh"
 [ -f "$COMMON_LIB" ] && source "$COMMON_LIB"
-apply_low_priority 2>/dev/null || true
+type apply_low_priority >/dev/null 2>&1 && apply_low_priority || true
 
 LOG_DIR="${LOG_DIR:-$BOUNCER_DIR/log}"
 QUARANTINE_DIR="${QUARANTINE_DIR:-/var/quarantine}"
@@ -28,6 +28,9 @@ BACKUP_RETENTION_DAYS=14
 freed=0
 prune() { # $1=dir, restul = argumente find
     local dir="$1"; shift
+    # Siguranta: nu sterge niciodata din / sau path gol (config gresit)
+    [ -z "$dir" ] && return 0
+    [ "$dir" = "/" ] && return 0
     [ -d "$dir" ] || return 0
     local n
     n=$(find "$dir" "$@" -print -delete 2>/dev/null | wc -l)

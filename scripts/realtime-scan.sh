@@ -204,7 +204,7 @@ send_telegram_notification() {
 
 # === VERIFICARE COMENZI (accepta clamdscan ca alternativa usoara) ===
 if ! command -v inotifywait >/dev/null 2>&1; then
-    log "ERROR" "inotifywait not found. Instaleaza: apt-get install inotify-tools"
+    log "ERROR" "inotifywait not found. Instaleaza: apt-get install inotify-tools | dnf install inotify-tools (EPEL)"
     exit 1
 fi
 if ! command -v clamscan >/dev/null 2>&1 && ! command -v clamdscan >/dev/null 2>&1; then
@@ -405,7 +405,7 @@ scan_file() {
     local exit_code=0
     
     # Scanare cu timeout + prioritate scazuta (nu fura CPU de la php/mysql)
-    output=$(timeout 60s nice -n 19 ionice -c3 $CLAMSCAN_CMD $CLAMSCAN_OPTS "$file_path" 2>&1) || exit_code=$?
+    output=$(timeout 60s lowprio_run $CLAMSCAN_CMD $CLAMSCAN_OPTS "$file_path" 2>&1) || exit_code=$?
     
     # Analizează rezultatul
     case $exit_code in

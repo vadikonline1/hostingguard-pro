@@ -20,20 +20,26 @@ if [ -f "$BOUNCER_DIR/hosting.env" ]; then
     # shellcheck disable=SC1091
     source "$BOUNCER_DIR/hosting.env"
 fi
+# shellcheck disable=SC1091
+[ -f "$BOUNCER_DIR/scripts/common.sh" ] && source "$BOUNCER_DIR/scripts/common.sh"
 
-# Curata placeholder-uri / goluri
+# Normalizeaza lista cu virgula (si spatii, pentru compatibilitate)
 WL=""
-for cand in ${WHITELIST_IPS:-}; do
-    [ "$cand" = "change-me" ] && continue
-    # accepta doar IPv4 valid (evita injectii in iptables)
-    if [[ "$cand" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]]; then
-        WL="$WL $cand"
-    fi
-done
-WL=$(echo "$WL" | tr ' ' '\n' | sort -u | tr '\n' ' ')
+if type normalize_whitelist >/dev/null 2>&1; then
+    WL=$(normalize_whitelist "${WHITELIST_IPS:-}")
+else
+    # fallback fara common.sh
+    for cand in $(echo "${WHITELIST_IPS:-}" | tr ',' ' '); do
+        [ "$cand" = "change-me" ] && continue
+        if [[ "$cand" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]]; then
+            WL="$WL $cand"
+        fi
+    done
+    WL=$(echo "$WL" | tr ' ' '\n' | sort -u | tr '\n' ' ')
+fi
 
 if [ -z "$(echo "$WL" | tr -d ' ')" ]; then
-    [ "$1" = "--status" ] && echo "Whitelist goala (WHITELIST_IPS necompletat in hosting.env)"
+    [ "${1:-}" = "--status" ] && echo "Whitelist goala (WHITELIST_IPS necompletat in hosting.env)"
     exit 0
 fi
 
@@ -56,12 +62,18 @@ is_banned() {
     echo "$banned" | grep -qw "$2"
 }
 
-if [ "$1" = "--status" ]; then
+# Prima regula din INPUT e ACCEPT-ul nostru? (tolerant la format: -s IP sau -s IP/32)
+is_top_accept() {
+    local first
+    first=$(iptables -S INPUT 2>/dev/null | head -1)
+    [[ "$first" == *"-s $1"* && "$first" == *"ACCEPT"* ]]
+}
+
+if [ "${1:-}" = "--status" ]; then
     echo "=== WHITELIST STATUS ==="
     echo "Lista: $WL"
     for ip in $WL; do
-        first=$(iptables -S INPUT 2>/dev/null | head -1)
-        if [ "$first" = "-A INPUT -s $ip/32 -j ACCEPT" ]; then echo "  $ip: ACCEPT pe pozitia 1 OK"; else echo "  $ip: ACCEPT NU e pe pozitia 1 (va fi reparat la urmatoarea rulare)"; fi
+        if is_top_accept "$ip"; then echo "  $ip: ACCEPT pe pozitia 1 OK"; else echo "  $ip: ACCEPT NU e pe pozitia 1 (va fi reparat la urmatoarea rulare)"; fi
         for j in $(jail_list); do
             if is_banned "$j" "$ip"; then echo "  $ip: BANAT in $j (!!)"; fi
         done
@@ -72,8 +84,7 @@ fi
 
 for ip in $WL; do
     # 1. ACCEPT pe pozitia 1 (doar daca lipsește sau e deplasat)
-    first=$(iptables -S INPUT 2>/dev/null | head -1)
-    if [ "$first" != "-A INPUT -s $ip/32 -j ACCEPT" ]; then
+    if ! is_top_accept "$ip"; then
         while iptables -D INPUT -s "$ip" -j ACCEPT 2>/dev/null; do :; done
         if iptables -I INPUT 1 -s "$ip" -j ACCEPT 2>/dev/null; then
             CHANGED=1
@@ -102,8 +113,8 @@ for ip in $WL; do
 "
     fi
 
-    # 4. ignoreip sync (reload doar daca a lipsit)
-    if [ -f "$JAIL_LOCAL" ] && ! grep -q "$ip" "$JAIL_LOCAL" 2>/dev/null; then
+    # 4. ignoreip sync (reload doar daca a lipsit; -w evita match partial 1.2.3.4 vs 1.2.3.40)
+    if [ -f "$JAIL_LOCAL" ] && ! grep -qw "$ip" "$JAIL_LOCAL" 2>/dev/null; then
         sed -i "s|^ignoreip = \(.*\)$|ignoreip = \1 $ip|" "$JAIL_LOCAL"
         CHANGED=1
         NOTES="$NOTES• $ip adaugat in fail2ban ignoreip

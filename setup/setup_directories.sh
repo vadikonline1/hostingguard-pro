@@ -58,7 +58,15 @@ setup_logrotate() {
 
     if ! command -v logrotate &> /dev/null; then
         log "Installing logrotate..."
-        apt-get install -y logrotate
+        if [ -f "$BOUNCER_DIR/scripts/common.sh" ]; then
+            # shellcheck disable=SC1091
+            source "$BOUNCER_DIR/scripts/common.sh"
+            pkg_install logrotate
+        elif command -v apt-get &> /dev/null; then
+            apt-get install -y logrotate
+        else
+            dnf install -y logrotate || yum install -y logrotate
+        fi
     fi
 
     cat > /etc/logrotate.d/hostingguard << EOF

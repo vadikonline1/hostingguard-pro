@@ -23,9 +23,13 @@ overload a small VPS**.
 
 ## Requirements
 
-- Ubuntu 20.04+ / Debian 11+ with root access
+- Ubuntu 20.04+ / Debian 11+ **or** Rocky/Alma/RHEL/CentOS 8+ with root access
 - 1GB+ RAM recommended (works on 1GB with `ENABLE_MALDET=0`)
 - A Telegram bot token + chat ID (for alerts only — everything works without it)
+
+> On RHEL-family systems the installer uses `dnf`/`yum`, enables EPEL
+> automatically and maps service names (`clamd@scan` instead of
+> `clamav-daemon`). No manual steps — same commands as below.
 
 ## Install from scratch
 
@@ -44,7 +48,7 @@ FASTPANEL_PASSWORD="change-me"
 TELEGRAM_BOT_TOKEN="change-me"
 TELEGRAM_CHAT_ID="change-me"
 TELEGRAM_THREAD_ID="change-me"
-WHITELIST_IPS="YOUR_ADMIN_IP YOUR_OFFICE_IP"
+WHITELIST_IPS="YOUR_ADMIN_IP,YOUR_OFFICE_IP"
 ```
 
 > ⚠️ Put **your own public IP** in `WHITELIST_IPS` (the one you SSH from).
@@ -64,7 +68,7 @@ crontab -l
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `WHITELIST_IPS` | `change-me` | Space-separated IPs that are never blocked |
+| `WHITELIST_IPS` | `change-me` | Comma-separated IPs that are never blocked (`1.2.3.4,5.6.7.8`) |
 | `USE_IPSET` | `1` | Fast ipset bans; auto-fallback if kernel lacks support |
 | `DAILY_SCAN_PATHS` | web/home/tmp | Daily scope (never whole `/var` or `/usr`) |
 | `FULL_SCAN_PATHS` | web/home/etc | Monthly full scope (no DB dirs, no `/usr`) |
@@ -167,6 +171,8 @@ marker that setup detects and preserves).
 | Telegram silent | `TELEGRAM_BOT_TOKEN`/`TELEGRAM_CHAT_ID` in `hosting.env`; test: `TELEGRAM_BOT_TOKEN=… TELEGRAM_CHAT_ID=… ./telegram_notify.sh "test"` |
 | `^M`/CRLF errors after editing on Windows | Repo enforces LF via `.gitattributes`; run `dos2unix` on any file you touched |
 | Fail2Ban won't start | `fail2ban-client -t`, then `journalctl -u fail2ban -n 30` |
+| SELinux denials on Rocky (clamd/fail2ban) | Check `ausearch -m avc -ts recent`; either write a local policy or set the affected service permissive — installer logs the exact denial |
+| firewalld + fail2ban on Rocky | Compatible (fail2ban manages its own chains); keep `firewalld` running, don't flush its rules |
 | ipset not used | Normal on OpenVZ/Virtuozzo kernels — setup falls back to `iptables-multiport` automatically |
 
 Logs: `/etc/automation-web-hosting/log/` · `/var/log/fail2ban.log` ·

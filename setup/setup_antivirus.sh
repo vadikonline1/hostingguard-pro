@@ -28,6 +28,21 @@ NOTIFY_SCRIPT="${NOTIFY_SCRIPT:-$BOUNCER_DIR/telegram_notify.sh}"
 REALTIME_SCAN_PATHS="${REALTIME_SCAN_PATHS:-/var/www}"
 QUARANTINE_DIR="${QUARANTINE_DIR:-/var/quarantine}"
 
+# Libraria comuna: multi-OS (apt/dnf), servicii ClamAV per distributie
+# shellcheck disable=SC1091
+[ -f "$SCRIPT_DIR/common.sh" ] && source "$SCRIPT_DIR/common.sh"
+[ -f "$BOUNCER_DIR/scripts/common.sh" ] && source "$BOUNCER_DIR/scripts/common.sh"
+if type detect_os >/dev/null 2>&1; then
+    detect_os
+    CLAM_SVC=$(clam_daemon_service)
+    FRESH_SVC=$(freshclam_service)
+    CLAMD_SOCK=$(clamd_socket_path)
+else
+    CLAM_SVC="clamav-daemon"
+    FRESH_SVC="clamav-freshclam"
+    CLAMD_SOCK="/run/clamav/clamd.ctl"
+fi
+
 # =============================================================================
 # FUNCTIONS
 # =============================================================================
@@ -53,8 +68,11 @@ fix_rkhunter_web_cmd() {
 }
 
 check_dependencies() {
-    local deps=("curl" "wget" "systemctl")
-    for dep in "${deps[@]}"; do
+    # curl/wget via package manager (apt sau dnf); systemctl trebuie sa existe
+    if type pkg_install >/dev/null 2>&1; then
+        pkg_install curl wget || return 1
+    fi
+    for dep in curl wget systemctl; do
         if ! command -v "$dep" &> /dev/null; then
             echo "❌ Dependency $dep not found"
             return 1
@@ -69,13 +87,26 @@ setup_directories() {
     chmod 700 "$LOG_DIR" "$QUARANTINE_DIR"
 }
 
-# Verifică dacă un pachet este deja instalat
+# Verifică dacă un pachet este deja instalat (nume Debian; mapare automata RHEL)
 is_package_installed() {
     local package="$1"
-    if dpkg -l | grep -q "^ii.*$package"; then
-        return 0
+    if type pkg_installed >/dev/null 2>&1; then
+        pkg_installed "$package"
+    elif command -v dpkg &> /dev/null; then
+        dpkg -l | grep -q "^ii.*$package"
     else
-        return 1
+        rpm -q "$package" &> /dev/null
+    fi
+}
+
+# Instaleaza pachete prin abstractia multi-OS (cu fallback legacy)
+os_install() {
+    if type pkg_install >/dev/null 2>&1; then
+        pkg_install "$@"
+    elif command -v apt-get &> /dev/null; then
+        apt-get update -y && DEBIAN_FRONTEND=noninteractive apt-get install -y "$@"
+    else
+        dnf install -y "$@" || yum install -y "$@"
     fi
 }
 
@@ -96,7 +127,7 @@ is_component_installed() {
     
     case "$component" in
         "clamav")
-            if command -v clamscan &> /dev/null && is_service_active "clamav-daemon"; then
+            if command -v clamscan &> /dev/null && is_service_active "$CLAM_SVC"; then
                 return 0
             fi
             ;;
@@ -134,18 +165,18 @@ install_clamav() {
         return 0
     fi
 
-    echo "[*] Installing ClamAV + Daemon + Freshclam..."
-    apt update -y && apt install -y clamav clamav-daemon clamav-freshclam
-    
+    echo "[*] Installing ClamAV + Daemon + Freshclam (OS: ${HG_OS_FAMILY:-auto})..."
+    os_install clamav clamav-daemon clamav-freshclam
+
     send_telegram_notification "🔧 ClamAV installed successfully on $(hostname)"
-    
+
     echo "[*] Stopping services for initial update..."
-    systemctl stop clamav-freshclam || true
+    systemctl stop "$FRESH_SVC" || true
     freshclam
-    
+
     echo "[*] Configuring ClamAV daemon..."
-    systemctl enable clamav-daemon clamav-freshclam
-    systemctl start clamav-daemon clamav-freshclam
+    systemctl enable "$CLAM_SVC" "$FRESH_SVC"
+    systemctl start "$CLAM_SVC" "$FRESH_SVC"
     
     # Așteptă puțin pentru a se asigura că serviciul a pornit
     sleep 5
@@ -166,7 +197,7 @@ install_inotify_tools() {
     fi
 
     echo "[*] Installing inotify-tools..."
-    apt install -y inotify-tools
+    os_install inotify-tools
     
     if is_component_installed "inotify-tools"; then
         echo "✅ inotify-tools installed successfully"
@@ -186,8 +217,7 @@ install_rkhunter() {
     fi
 
     echo "[*] Installing rkhunter..."
-    apt update -y
-    apt install -y rkhunter
+    os_install rkhunter
 
     echo "[*] Updating rkhunter data files..."
     rkhunter --update || echo "⚠️ rkhunter update encountered warnings, check /var/log/rkhunter.log"
@@ -247,7 +277,9 @@ install_maldet() {
         
         # Configurare optimizată
         sed -i 's/^scan_clamscan=.*/scan_clamscan="1"/' "$CONF"
-        sed -i 's/^clamd_socket=.*/clamd_socket="\/run\/clamav\/clamd.ctl"/' "$CONF"
+        # Socketul difera pe RHEL (/run/clamd.scan/clamd.sock) — escape pentru sed
+        _sock_esc=$(echo "$CLAMD_SOCK" | sed 's|/|\\/|g')
+        sed -i "s/^clamd_socket=.*/clamd_socket=\"$_sock_esc\"/" "$CONF"
         sed -i 's/^email_alert=.*/email_alert="0"/' "$CONF"
         sed -i 's/^quar_hits=.*/quar_hits="1"/' "$CONF"
         sed -i 's/^quar_clean=.*/quar_clean="1"/' "$CONF"
@@ -288,8 +320,8 @@ create_systemd_service() {
     cat > "$SERVICE_DIR/realtime-monitor.service" << EOF
 [Unit]
 Description=Real-time File System Malware Monitor (low-priority)
-After=network.target clamav-daemon.service
-Requires=clamav-daemon.service
+After=network.target $CLAM_SVC.service
+Requires=$CLAM_SVC.service
 
 [Service]
 Type=simple
@@ -363,11 +395,11 @@ start_services() {
     fi
     
     # Asigură-te că ClamAV este running
-    if is_service_active "clamav-daemon"; then
+    if is_service_active "$CLAM_SVC"; then
         echo "✅ ClamAV daemon is running"
     else
         echo "⚠️ ClamAV daemon is not running - attempting to start..."
-        systemctl start clamav-daemon || echo "❌ Failed to start ClamAV daemon"
+        systemctl start "$CLAM_SVC" || echo "❌ Failed to start ClamAV daemon"
     fi
 }
 

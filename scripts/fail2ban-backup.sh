@@ -13,6 +13,13 @@ if [ -f "$BOUNCER_DIR/hosting.env" ]; then
     # shellcheck disable=SC1091
     source "$BOUNCER_DIR/hosting.env"
 fi
+# shellcheck disable=SC1091
+[ -f "$BOUNCER_DIR/scripts/common.sh" ] && source "$BOUNCER_DIR/scripts/common.sh"
+if type lowprio_run >/dev/null 2>&1; then
+    LOWRUN="lowprio_run"
+else
+    LOWRUN=""
+fi
 
 BACKUP_DIR="/var/backups/fail2ban"
 CONF_DIR="/etc/fail2ban"
@@ -21,8 +28,8 @@ DATE=$(date '+%Y-%m-%d_%H-%M-%S')
 BACKUP_FILE="$BACKUP_DIR/fail2ban_backup_$DATE.tar.gz"
 
 echo "[*] Creare backup Fail2Ban (prioritate scazuta)..."
-# gzip -1 = rapid, nu strange CPU ca default -6; ionice idle nu blocheaza IO
-if nice -n 19 ionice -c3 tar -I 'gzip -1' -cf "$BACKUP_FILE" "$CONF_DIR" /var/lib/fail2ban 2>/dev/null; then
+# gzip -1 = rapid, nu strange CPU ca default -6; prioritate minima (fara ionice lipsa = skip tacut)
+if $LOWRUN tar -I 'gzip -1' -cf "$BACKUP_FILE" "$CONF_DIR" /var/lib/fail2ban 2>/dev/null; then
     echo "[+] Backup creat: $BACKUP_FILE ($(du -h "$BACKUP_FILE" | cut -f1))"
     # Sterge backup-uri mai vechi de 14 zile
     find "$BACKUP_DIR" -name "fail2ban_backup_*.tar.gz" -mtime +14 -delete 2>/dev/null || true

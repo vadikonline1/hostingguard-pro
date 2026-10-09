@@ -34,9 +34,17 @@ install_fastpanel() {
     
     log "Installing FastPanel..."
     send_telegram_notification "🔄 Installing FastPanel control panel..."
-    
-    # Install dependencies
-    DEBIAN_FRONTEND=noninteractive apt-get install -y ca-certificates wget
+
+    # Install dependencies (apt sau dnf)
+    if [ -f "${BOUNCER_DIR:-/etc/automation-web-hosting}/scripts/common.sh" ]; then
+        # shellcheck disable=SC1091
+        source "${BOUNCER_DIR:-/etc/automation-web-hosting}/scripts/common.sh"
+        pkg_install ca-certificates wget
+    elif command -v apt-get &> /dev/null; then
+        DEBIAN_FRONTEND=noninteractive apt-get install -y ca-certificates wget
+    else
+        dnf install -y ca-certificates wget || yum install -y ca-certificates wget
+    fi
     
     # Download and install
     if wget -q https://repo.fastpanel.direct/install_fastpanel.sh -O /tmp/install_fastpanel.sh; then

@@ -8,6 +8,9 @@ set -e
 # Load environment and utilities
 CURRENT_PATH_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${CURRENT_PATH_DIR}/telegram_notify.sh"
+# Libraria comuna: detectie OS (Debian/RHEL) + pkg_install + servicii
+# shellcheck disable=SC1091
+[ -f "${CURRENT_PATH_DIR}/scripts/common.sh" ] && source "${CURRENT_PATH_DIR}/scripts/common.sh"
 ENV_FILES="$CURRENT_PATH_DIR/*.env"
 
 # Încarcă toate fișierele .env
@@ -28,10 +31,16 @@ log() {
 setup_dos2unix() {
     log "Setting up dos2unix for proper line endings..."
     
-    # Install dos2unix if not already installed
+    # Install dos2unix if not already installed (apt sau dnf)
     if ! command -v dos2unix &> /dev/null; then
         log "Installing dos2unix package..."
-        apt install -y dos2unix
+        if type pkg_install >/dev/null 2>&1; then
+            pkg_install dos2unix
+        elif command -v apt-get &> /dev/null; then
+            apt-get install -y dos2unix
+        else
+            dnf install -y dos2unix || yum install -y dos2unix
+        fi
     else
         log "✅ dos2unix already installed"
     fi
@@ -66,35 +75,34 @@ setup_dos2unix() {
     fi
 }
 
-# Prepare system: update and install required packages
+# Prepare system: update and install required packages (Debian + RHEL)
 prepare_system() {
     log "Updating system packages and installing dependencies..."
 
-    # Update and upgrade
-    apt update && apt -y upgrade
+    if type detect_os >/dev/null 2>&1; then detect_os; fi
+    log "OS family: ${HG_OS_FAMILY:-unknown} (pkg: ${PKG_MGR:-none})"
 
-    # List of required packages
-    local packages=(
-        mc
-        inotify-tools
-        clamav
-        clamav-daemon
-        curl
-        jq
-        sudo
-        fail2ban
-        dos2unix
-    )
+    # Refresh + upgrade (echivalent pe ambele familii)
+    if [ "${HG_OS_FAMILY}" = "rhel" ]; then
+        $PKG_MGR makecache && $PKG_MGR upgrade -y
+    else
+        apt-get update && apt-get -y upgrade
+    fi
 
-    # Install packages if not already installed
-    for pkg in "${packages[@]}"; do
-        if ! dpkg -s "$pkg" &> /dev/null; then
-            log "Installing missing package: $pkg"
-            apt install -y "$pkg"
-        else
-            log "✅ Package already installed: $pkg"
-        fi
-    done
+    # Nume Debian — maparea pe RHEL e automata (clamav-daemon→clamd etc.)
+    if type pkg_install >/dev/null 2>&1; then
+        pkg_install mc inotify-tools clamav clamav-daemon clamav-freshclam curl jq sudo fail2ban dos2unix
+    else
+        local packages=(mc inotify-tools clamav clamav-daemon curl jq sudo fail2ban dos2unix)
+        for pkg in "${packages[@]}"; do
+            if ! dpkg -s "$pkg" &> /dev/null; then
+                log "Installing missing package: $pkg"
+                apt-get install -y "$pkg"
+            else
+                log "✅ Package already installed: $pkg"
+            fi
+        done
+    fi
 
     # Ensure inotifywait is available (from inotify-tools)
     if ! command -v inotifywait &> /dev/null; then
@@ -102,11 +110,13 @@ prepare_system() {
         exit 1
     fi
 
-    # Update ClamAV database
+    # Update ClamAV database (numele serviciului difera pe RHEL)
     log "Updating ClamAV virus definitions..."
-    systemctl stop clamav-freshclam.service || true
+    local fresh_svc="clamav-freshclam"
+    if type freshclam_service >/dev/null 2>&1; then fresh_svc=$(freshclam_service); fi
+    systemctl stop "$fresh_svc.service" || true
     freshclam || log "⚠️ ClamAV database update failed"
-    systemctl start clamav-freshclam.service || true
+    systemctl start "$fresh_svc.service" || true
 
     # Setup dos2unix for proper line endings
     setup_dos2unix
@@ -126,22 +136,33 @@ display_banner() {
     echo "=================================================="
 }
 
-# Check system compatibility
+# Check system compatibility (Debian/Ubuntu + Rocky/Alma/RHEL/CentOS)
 check_system() {
     log "Checking system compatibility..."
-    
-    if [ ! -f /etc/debian_version ] && [ ! -f /etc/lsb-release ]; then
-        log "❌ This script is only for Debian/Ubuntu systems"
-        exit 1
-    fi
-    
+
+    if type detect_os >/dev/null 2>&1; then detect_os; fi
+    case "${HG_OS_FAMILY:-}" in
+        debian|rhel) log "✅ OS family supported: $HG_OS_FAMILY" ;;
+        *)
+            if [ -f /etc/debian_version ] || [ -f /etc/lsb-release ]; then
+                log "✅ Debian/Ubuntu system detected"
+            elif [ -f /etc/redhat-release ]; then
+                log "✅ RHEL-family system detected"
+            else
+                log "❌ Unsupported OS — need Debian/Ubuntu or Rocky/Alma/RHEL/CentOS"
+                exit 1
+            fi
+            ;;
+    esac
+
     if command -v lsb_release >/dev/null 2>&1; then
         DISTRO=$(lsb_release -d | cut -f2)
         log "✅ System verified: $DISTRO"
-    else
-        log "✅ Debian/Ubuntu system detected"
+    elif [ -f /etc/os-release ]; then
+        # shellcheck disable=SC1091
+        log "✅ System verified: $(grep '^PRETTY_NAME=' /etc/os-release | cut -d= -f2 | tr -d '"')"
     fi
-    
+
     if [ "$EUID" -ne 0 ]; then
         log "❌ Please run as root"
         exit 1

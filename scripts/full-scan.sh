@@ -293,30 +293,34 @@ run_clamav_scan() {
     [ "$CLAM_CMD" = "clamdscan" ] && CLAM_IS_DAEMON=1
     log "INFO" "Clam engine: $CLAM_CMD (daemon=$CLAM_IS_DAEMON)"
 
-    # Limite REALE — inainte --max-scansize=0 (nelimitat) scana arhive de GB si OOM-kill
-    local clamav_opts=(
-        --recursive
-        --infected
-        --max-filesize="$MAX_FILE_SIZE"
-        --max-scansize="$MAX_SCANSIZE"
-        --max-recursion=10
-        --exclude-dir=^/proc
-        --exclude-dir=^/sys
-        --exclude-dir=^/dev
-        --exclude-dir=^/run
-        --exclude-dir=^/var/lib/mysql
-        --exclude-dir=^/var/lib/docker
-        --exclude-dir=^/var/lib/postgresql
-        --exclude-dir=^/var/lib/clamav
-        --exclude-dir=^/var/spool
-        --exclude-dir=^/var/cache
-    )
-    [ "$CLAM_IS_DAEMON" = "1" ] && clamav_opts+=(--multiscan --fdpass)
-    
-    # Adăugăm exclude patterns în array
-    for pattern in $EXCLUDE_PATHS; do
-        clamav_opts+=(--exclude="$pattern")
-    done
+    # clamdscan (daemon) accepta doar un subset de optiuni — limitele de marime
+    # vin din clamd.conf; clamscan primeste limite explicite (altfel OOM-kill)
+    local clamav_opts=()
+    if [ "$CLAM_IS_DAEMON" = "1" ]; then
+        clamav_opts=(--recursive --infected --multiscan --fdpass)
+    else
+        clamav_opts=(
+            --recursive
+            --infected
+            --max-filesize="$MAX_FILE_SIZE"
+            --max-scansize="$MAX_SCANSIZE"
+            --max-recursion=10
+            --exclude-dir=^/proc
+            --exclude-dir=^/sys
+            --exclude-dir=^/dev
+            --exclude-dir=^/run
+            --exclude-dir=^/var/lib/mysql
+            --exclude-dir=^/var/lib/docker
+            --exclude-dir=^/var/lib/postgresql
+            --exclude-dir=^/var/lib/clamav
+            --exclude-dir=^/var/spool
+            --exclude-dir=^/var/cache
+        )
+        # Adăugăm exclude patterns în array (doar clamscan le suporta)
+        for pattern in $EXCLUDE_PATHS; do
+            clamav_opts+=(--exclude="$pattern")
+        done
+    fi
     
     for path in $SCAN_PATHS; do
         if [ ! -d "$path" ] && [ ! -f "$path" ]; then 
@@ -332,7 +336,7 @@ run_clamav_scan() {
         local path_quarantined=0
         
         # Folosim timeout dur + skip daca loadul sare in timpul scanului
-        output=$(timeout $CLAMAV_TIMEOUT nice -n 19 ionice -c3 "$CLAM_CMD" "${clamav_opts[@]}" "$path" 2>&1) || exit_code=$?
+        output=$(timeout $CLAMAV_TIMEOUT lowprio_run "$CLAM_CMD" "${clamav_opts[@]}" "$path" 2>&1) || exit_code=$?
         if [ "$exit_code" -eq 124 ]; then
             log "WARNING" "Timeout $path dupa ${CLAMAV_TIMEOUT}s — trec mai departe"
             continue
@@ -422,7 +426,7 @@ run_maldet_scan() {
     # Rulează scanarea Maldet cu timeout + prioritate scazuta
     log "INFO" "Running maldet scan with timeout: ${MALDET_TIMEOUT}s"
     local maldet_output
-    maldet_output=$(timeout $MALDET_TIMEOUT nice -n 19 ionice -c3 $MALDET_CMD -a $SCAN_PATHS 2>&1) || true
+    maldet_output=$(timeout $MALDET_TIMEOUT lowprio_run $MALDET_CMD -a $SCAN_PATHS 2>&1) || true
     
     local scan_end=$(date +%s)
     local scan_duration=$((scan_end - scan_start))

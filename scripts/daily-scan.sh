@@ -208,7 +208,7 @@ trap cleanup EXIT INT TERM
 
 # --- VERIFY REQUIRED COMMANDS (accepta clamscan SAU clamdscan) -----------------
 if ! command -v clamscan >/dev/null 2>&1 && ! command -v clamdscan >/dev/null 2>&1; then
-    log "ERROR" "nici clamscan, nici clamdscan gasit. Instaleaza: apt-get install clamav clamav-daemon"
+    log "ERROR" "nici clamscan, nici clamdscan gasit. Instaleaza: apt-get install clamav clamav-daemon | dnf install clamav clamd"
     exit 1
 fi
 
@@ -262,31 +262,34 @@ run_clamav_scan() {
     [ "$CLAM_CMD" = "clamdscan" ] && CLAM_IS_DAEMON=1
     log "INFO" "Clam engine: $CLAM_CMD (daemon=$CLAM_IS_DAEMON), timeout=${DAILY_CLAMAV_TIMEOUT}s"
 
-    # Optiuni cu limite REALE (inainte: --max-scansize=0 = nelimitat => OOM/IO stall)
-    local clamav_opts=(
-        --recursive
-        --infected
-        --max-filesize="$MAX_FILE_SIZE"
-        --max-scansize="$MAX_SCANSIZE"
-        --max-recursion=10
-        --exclude-dir=^/proc
-        --exclude-dir=^/sys
-        --exclude-dir=^/dev
-        --exclude-dir=^/run
-        --exclude-dir=^/var/lib/mysql
-        --exclude-dir=^/var/lib/docker
-        --exclude-dir=^/var/lib/postgresql
-        --exclude-dir=^/var/lib/clamav
-        --exclude-dir=^/var/spool
-        --exclude-dir=^/var/cache
-    )
-    # Daemonul scaneaza paralel, mult mai ieftin
-    [ "$CLAM_IS_DAEMON" = "1" ] && clamav_opts+=(--multiscan --fdpass)
-    
-    # Adăugăm exclude patterns în array
-    for pattern in $EXCLUDE_PATHS; do
-        clamav_opts+=(--exclude="$pattern")
-    done
+    # clamdscan (daemon) accepta doar un subset de optiuni — limitele de marime
+    # vin din clamd.conf; clamscan primeste limite explicite (altfel OOM/IO stall)
+    local clamav_opts=()
+    if [ "$CLAM_IS_DAEMON" = "1" ]; then
+        clamav_opts=(--recursive --infected --multiscan --fdpass)
+    else
+        clamav_opts=(
+            --recursive
+            --infected
+            --max-filesize="$MAX_FILE_SIZE"
+            --max-scansize="$MAX_SCANSIZE"
+            --max-recursion=10
+            --exclude-dir=^/proc
+            --exclude-dir=^/sys
+            --exclude-dir=^/dev
+            --exclude-dir=^/run
+            --exclude-dir=^/var/lib/mysql
+            --exclude-dir=^/var/lib/docker
+            --exclude-dir=^/var/lib/postgresql
+            --exclude-dir=^/var/lib/clamav
+            --exclude-dir=^/var/spool
+            --exclude-dir=^/var/cache
+        )
+        # Adăugăm exclude patterns în array (doar clamscan le suporta)
+        for pattern in $EXCLUDE_PATHS; do
+            clamav_opts+=(--exclude="$pattern")
+        done
+    fi
     
     for path in $DAILY_SCAN_PATHS; do
         if [ ! -d "$path" ]; then 
@@ -389,7 +392,7 @@ run_maldet_scan() {
     
     # Excludem path-urile pentru Maldet; timeout configurabil (inainte fix 3600s)
     local maldet_output
-    maldet_output=$(timeout "$MALDET_TIMEOUT" nice -n 19 ionice -c3 $MALDET_CMD -a $DAILY_SCAN_PATHS 2>&1) || true
+    maldet_output=$(timeout "$MALDET_TIMEOUT" lowprio_run $MALDET_CMD -a $DAILY_SCAN_PATHS 2>&1) || true
     
     local scan_end=$(date +%s)
     local scan_duration=$((scan_end - scan_start))

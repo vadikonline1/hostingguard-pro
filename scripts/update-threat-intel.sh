@@ -13,6 +13,8 @@ if [ -f "$BOUNCER_DIR/hosting.env" ]; then
     # shellcheck disable=SC1091
     source "$BOUNCER_DIR/hosting.env"
 fi
+# shellcheck disable=SC1091
+[ -f "$BOUNCER_DIR/scripts/common.sh" ] && source "$BOUNCER_DIR/scripts/common.sh"
 
 renice -n 19 -p $$ >/dev/null 2>&1 || true
 
@@ -43,8 +45,11 @@ cat "$TMPDIR_WORK"/*.txt 2>/dev/null \
     | sort -u | head -n 50000 > "$THREAT_INTEL_DIR/combined_threats.txt.tmp"
 
 # NU bloca niciodata IP-urile whitelist (altfel guard-ul si threat-intel se bat)
-for wip in ${WHITELIST_IPS:-}; do
+# Lista e cu virgula: "1.2.3.4,5.6.7.8" (spatiile sunt tolerate)
+WL_CLEAN=$(echo "${WHITELIST_IPS:-}" | tr ',' ' ')
+for wip in $WL_CLEAN; do
     [ "$wip" = "change-me" ] && continue
+    [ -z "$wip" ] && continue
     grep -vx "$wip" "$THREAT_INTEL_DIR/combined_threats.txt.tmp" > "$THREAT_INTEL_DIR/combined_threats.txt.tmp2" 2>/dev/null \
         && mv -f "$THREAT_INTEL_DIR/combined_threats.txt.tmp2" "$THREAT_INTEL_DIR/combined_threats.txt.tmp"
 done
