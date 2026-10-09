@@ -52,10 +52,36 @@ create_directories() {
     fi
 }
 
+# Logrotate: toate logurile HostingGuard pe rotatie 7 zile (altfel umplu HDD-ul)
+setup_logrotate() {
+    local logdir="${LOG_DIR:-/etc/automation-web-hosting/log}"
+
+    if ! command -v logrotate &> /dev/null; then
+        log "Installing logrotate..."
+        apt-get install -y logrotate
+    fi
+
+    cat > /etc/logrotate.d/hostingguard << EOF
+$logdir/*.log {
+    daily
+    rotate 7
+    compress
+    delaycompress
+    missingok
+    notifempty
+    copytruncate
+    maxsize 100M
+}
+EOF
+    chmod 644 /etc/logrotate.d/hostingguard
+    log "✅ Logrotate configurat: $logdir (7 zile, max 100M/fisier)"
+}
+
 # Main flow
 main() {
     log "Setting up directory structure..."
     create_directories
+    setup_logrotate
     log "✅ Directory setup completed"
 	send_telegram_notification "✅ Directory setup completed"
 }

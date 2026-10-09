@@ -76,11 +76,14 @@ crontab -l
 | `REALTIME_MAX_PARALLEL` | `2` | Cap on concurrent real-time scans |
 | `TELEGRAM_MAX_PER_HOUR` | `20` | Notification rate limit |
 | `DISK_CRIT` / `MEM_CRIT` | `90` / `92` | Auto-heal alert thresholds (%) |
+| `LOG_RETENTION_DAYS` | `7` | Log rotation (logrotate + daily prune safety net) |
+| `QUARANTINE_RETENTION_DAYS` | `30` | Old quarantined files are deleted |
 
 ## Schedule (staggered, low priority)
 
 | Task | Cron | Notes |
 |---|---|---|
+| Cleanup | `15 1 * * *` daily | 7-day logs (`/etc/logrotate.d/hostingguard` + prune safety net), /tmp markers, old quarantine/backups |
 | Backup | `5 2 * * *` daily | `gzip -1`, keeps 14 days, alerts on failure only |
 | Daily scan | `30 2 * * *` daily | Web/home/tmp, hard timeout |
 | Threat intel | `0 3 * * 0` weekly | Capped at 50k IPs, whitelist excluded |
@@ -155,6 +158,8 @@ marker that setup detects and preserves).
 
 | Symptom | Fix |
 |---|---|
+| Disk full **right now** | `df -h` to confirm, then run: `truncate -s 0 /etc/automation-web-hosting/log/realtime-monitor.log` + `/etc/automation-web-hosting/scripts/prune-logs.sh` + `journalctl --vacuum-size=200M` if the journal is huge |
+| `/tmp` full | `rm -rf /tmp/clamav_processed` (recreated automatically; monitor purges it every 500 events + prune daily) |
 | Locked out (own IP banned) | Emergency commands above, then `secmgr whitelist-add` |
 | High load during scans | Lower `MAX_LOAD_FACTOR`, set `ENABLE_MALDET=0`, check `uptime` vs cron hours |
 | `ACCEPT 0.0.0.0/0` in `iptables -L INPUT` | Orphan rule that bypasses SSH filtering — find its source before removing; never auto-deleted by design |
@@ -181,6 +186,7 @@ hostingguard-pro/
 │   ├── full-scan.sh          # monthly, no /usr or DB dirs
 │   ├── realtime-scan.sh      # daemon-based, 2 parallel max
 │   ├── whitelist-guard.sh    # hourly: whitelisted IPs are never blocked
+│   ├── prune-logs.sh         # daily 01:15: 7-day logs, /tmp markers, old data
 │   ├── fail2ban_autoheal.sh  # every 15 min, cooldown alerts
 │   ├── fail2ban-backup.sh
 │   ├── update-threat-intel.sh

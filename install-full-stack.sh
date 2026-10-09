@@ -240,6 +240,7 @@ setup_cron_jobs_simple() {
         | grep -v "rkhunter --update" | grep -v "fail2ban-backup.sh" \
         | grep -v "update-threat-intel.sh" | grep -v "fail2ban_autoheal" \
         | grep -v "whitelist-guard.sh" \
+        | grep -v "prune-logs.sh" \
         | grep -v "fail2ban-report.sh" > "$tmpcron" || true
 
     cat >> "$tmpcron" << EOF
@@ -249,6 +250,7 @@ setup_cron_jobs_simple() {
 # esalonat + nice/ionice + flock — NU mai pune totul la 00:00
 # ===========================================
 5 2 * * * /usr/bin/flock -n /run/hg-cron-backup.lock /usr/bin/nice -n 19 /usr/bin/ionice -c3 $SCRIPT_DIR/scripts/fail2ban-backup.sh >> $LOG_DIR/cron-backup.log 2>&1
+15 1 * * * /usr/bin/flock -n /run/hg-cron-prune.lock /usr/bin/nice -n 19 /usr/bin/ionice -c3 $SCRIPT_DIR/scripts/prune-logs.sh >> $LOG_DIR/prune.log 2>&1
 30 2 * * * /usr/bin/flock -n /run/hg-cron-daily.lock /usr/bin/nice -n 19 /usr/bin/ionice -c3 $SCRIPT_DIR/scripts/daily-scan.sh >> $LOG_DIR/daily-scan.log 2>&1
 0 3 * * 0 /usr/bin/flock -n /run/hg-cron-threat.lock /usr/bin/nice -n 19 /usr/bin/ionice -c3 $SCRIPT_DIR/scripts/update-threat-intel.sh >> $LOG_DIR/threat-intel.log 2>&1
 0 4 1-7 * 0 /usr/bin/flock -n /run/hg-cron-full.lock /usr/bin/nice -n 19 /usr/bin/ionice -c3 $SCRIPT_DIR/scripts/full-scan.sh >> $LOG_DIR/full-scan.log 2>&1
@@ -264,6 +266,7 @@ EOF
     rm -f "$tmpcron"
 
     echo "[+] Cron jobs OPTIMIZED installed:"
+    echo "    curatenie (loguri 7z): 01:15"
     echo "    backup zilnic:      02:05"
     echo "    daily scan:         02:30 (doar web/home/tmp, nice 19)"
     echo "    threat intel:       duminica 03:00 (saptamanal, nu zilnic)"

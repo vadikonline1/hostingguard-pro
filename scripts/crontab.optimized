@@ -5,6 +5,9 @@
 # Instalare: crontab -l | grep -v automation-web-hosting ; cat crontab.optimized | crontab -
 # =============================================================================
 
+# Curatenie zilnica 01:15 (loguri 7 zile, /tmp markeri, quarantine/backup vechi)
+15 1 * * * /usr/bin/flock -n /run/hg-cron-prune.lock /usr/bin/nice -n 19 /usr/bin/ionice -c3 /etc/automation-web-hosting/scripts/prune-logs.sh >> /etc/automation-web-hosting/log/prune.log 2>&1
+
 # Fail2Ban backup zilnic 02:05 (inainte de scanari, rapid cu gzip -1)
 5 2 * * * /usr/bin/flock -n /run/hg-cron-backup.lock /usr/bin/nice -n 19 /usr/bin/ionice -c3 /etc/automation-web-hosting/scripts/fail2ban-backup.sh >> /etc/automation-web-hosting/log/cron-backup.log 2>&1
 

@@ -132,6 +132,7 @@ START_TIME=$(date +%s)
 TOTAL_FILES_SCANNED=0
 TOTAL_THREATS_DETECTED=0
 CLEANUP_DONE=0
+EVENTS_SINCE_PURGE=0
 
 # === FUNCTIE CLEANUP ===
 cleanup() {
@@ -527,6 +528,15 @@ $INOTIFYWAIT_CMD -m -r -e close_write,moved_to,create --exclude '(.*\.log|.*\.tm
         # Coada plina: asteapta un slot in loc sa fork-uiesti la infinit
         wait -n 2>/dev/null || wait
         scan_file "$file_path" &
+    fi
+
+    # Purge periodic al markerilor expirati — altfel /tmp/clamav_processed
+    # creste la nesfarsit cat monitorul ruleaza (un fisier per eveniment)
+    EVENTS_SINCE_PURGE=$((EVENTS_SINCE_PURGE + 1))
+    if [ "$EVENTS_SINCE_PURGE" -ge 500 ]; then
+        EVENTS_SINCE_PURGE=0
+        # sterge doar markerii mai vechi decat cooldown-ul (rotunjire in sus, minim 1 min)
+        find "$RECENTLY_PROCESSED_DIR" -type f -mmin +$(( (RECENTLY_PROCESSED_TIMEOUT + 59) / 60 )) -delete 2>/dev/null || true
     fi
 
     # Limită rate-ul de scanare
