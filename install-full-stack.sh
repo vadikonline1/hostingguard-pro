@@ -370,11 +370,24 @@ final_setup() {
         log "❌ Bind mount failed"
     fi
     
-    # Add to fstab if not already present
-    if ! grep -q "$FASTPANEL_LOG" /etc/fstab; then
-        echo "$LOG_DIR $FASTPANEL_LOG none bind 0 0" >> /etc/fstab
-        log "✅ Added mount to /etc/fstab"
+    # Demonteaza tintele vechi/stale din reinstalluri anterioare (cai diferite),
+    # pastrand doar tinta canonica
+    for stale in /var/www/fastuser/data/clam_log /var/www/fastuser/data/logs/clam_log /var/www/fastuser/data/log/clam_log; do
+        if [ "$stale" != "$FASTPANEL_LOG" ] && mountpoint -q "$stale" 2>/dev/null; then
+            umount "$stale" 2>/dev/null && log "✅ Demontat mount stal: $stale"
+        fi
+    done
+
+    # Curata TOATE intrarile vechi de bind pentru loguri (altfel se acumuleaza
+    # cate una la fiecare reinstall) si lasa exact una singura, canonica
+    if grep -q "automation-web-hosting/log" /etc/fstab 2>/dev/null; then
+        cp -a /etc/fstab /etc/fstab.bak.hg 2>/dev/null || true
+        grep -v "automation-web-hosting/log" /etc/fstab > /tmp/fstab.hg \
+            && cat /tmp/fstab.hg > /etc/fstab && rm -f /tmp/fstab.hg
+        log "✅ Intrari fstab vechi/stale curatate (backup: /etc/fstab.bak.hg)"
     fi
+    echo "$LOG_DIR $FASTPANEL_LOG none bind 0 0" >> /etc/fstab
+    log "✅ Mount canonic in /etc/fstab: $LOG_DIR -> $FASTPANEL_LOG"
     
     # Set ownership
     if id "fastuser" &>/dev/null; then
