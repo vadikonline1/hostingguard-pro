@@ -239,6 +239,7 @@ setup_cron_jobs_simple() {
         | grep -v "clamav-daily" | grep -v "freshclam" | grep -v "maldet -u" \
         | grep -v "rkhunter --update" | grep -v "fail2ban-backup.sh" \
         | grep -v "update-threat-intel.sh" | grep -v "fail2ban_autoheal" \
+        | grep -v "whitelist-guard.sh" \
         | grep -v "fail2ban-report.sh" > "$tmpcron" || true
 
     cat >> "$tmpcron" << EOF
@@ -253,6 +254,7 @@ setup_cron_jobs_simple() {
 0 4 1-7 * 0 /usr/bin/flock -n /run/hg-cron-full.lock /usr/bin/nice -n 19 /usr/bin/ionice -c3 $SCRIPT_DIR/scripts/full-scan.sh >> $LOG_DIR/full-scan.log 2>&1
 15 5 1-7 * 1 /usr/bin/nice -n 19 /usr/bin/ionice -c3 /usr/local/maldetect/maldet -u >> $LOG_DIR/maldet-update.log 2>&1
 */15 * * * * /usr/bin/flock -n /run/hg-cron-heal.lock $SCRIPT_DIR/scripts/fail2ban_autoheal.sh >> $LOG_DIR/autoheal.log 2>&1
+17 * * * * /usr/bin/flock -n /run/hg-cron-whitelist.lock $SCRIPT_DIR/scripts/whitelist-guard.sh >> $LOG_DIR/whitelist-guard.log 2>&1
 0 8 * * * /usr/bin/flock -n /run/hg-cron-report.lock $SCRIPT_DIR/scripts/fail2ban-report.sh daily >> $LOG_DIR/report.log 2>&1
 # NOTA: freshclam e gestionat de daemon (clamav-freshclam), NU din cron.
 # rkhunter --propupd e dezactivat implicit (ENABLE_RKHUNTER=0) — prea greu pe VPS.
@@ -267,6 +269,7 @@ EOF
     echo "    threat intel:       duminica 03:00 (saptamanal, nu zilnic)"
     echo "    full scan:          prima duminica 04:00 (LUNAR, nu saptamanal)"
     echo "    autoheal:           la 15 min (nu 5)"
+    echo "    whitelist guard:    orar (IP-urile proprii nu sunt blocate)"
     crontab -l | grep -A20 "HOSTINGGUARD - OPTIMIZED" || true
 }
 
@@ -387,7 +390,7 @@ display_summary() {
     log "✅ Fail2Ban: $(command -v fail2ban-server &>/dev/null && echo 'Installed' || echo 'Not installed')"
     log "✅ ClamAV Monitoring: $(systemctl is-active clamav-monitor.service &>/dev/null && echo 'Active' || echo 'Inactive')"
     log "✅ dos2unix: $(command -v dos2unix &>/dev/null && echo 'Installed & Configured' || echo 'Not installed')"
-    log "✅ Daily Scans: Scheduled for ${DAILY_SCAN_TIME}"
+    log "✅ Daily Scans: 02:30 low-priority (+ whitelist guard hourly)"
     
     # Display Fail2Ban status if installed
     if command -v fail2ban-server &>/dev/null; then
@@ -407,7 +410,8 @@ display_summary() {
 🛡️ Security: Fail2Ban + ClamAV active
 🔧 Utilities: dos2unix configured
 📊 Monitoring: File changes, malware & intrusion detection
-📅 Daily scans: ${DAILY_SCAN_TIME}
+📅 Daily scans: 02:30 low-priority
+🛡️ Whitelist guard: hourly (whitelisted IPs never blocked)
 ✅ Status: Operational"
 }
 

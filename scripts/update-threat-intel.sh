@@ -40,8 +40,15 @@ echo "[*] Combinare liste..."
 cat "$TMPDIR_WORK"/*.txt 2>/dev/null \
     | grep -Eo '([0-9]{1,3}\.){3}[0-9]{1,3}(/[0-9]{1,2})?' \
     | grep -vE '^(10\.|172\.(1[6-9]|2[0-9]|3[01])\.|192\.168\.|127\.|0\.|255\.)' \
-    | sort -u | head -n 50000 > "$THREAT_INTEL_DIR/combined_threats.txt.tmp" \
-    && mv -f "$THREAT_INTEL_DIR/combined_threats.txt.tmp" "$THREAT_INTEL_DIR/combined_threats.txt"
+    | sort -u | head -n 50000 > "$THREAT_INTEL_DIR/combined_threats.txt.tmp"
+
+# NU bloca niciodata IP-urile whitelist (altfel guard-ul si threat-intel se bat)
+for wip in ${WHITELIST_IPS:-}; do
+    [ "$wip" = "change-me" ] && continue
+    grep -vx "$wip" "$THREAT_INTEL_DIR/combined_threats.txt.tmp" > "$THREAT_INTEL_DIR/combined_threats.txt.tmp2" 2>/dev/null \
+        && mv -f "$THREAT_INTEL_DIR/combined_threats.txt.tmp2" "$THREAT_INTEL_DIR/combined_threats.txt.tmp"
+done
+mv -f "$THREAT_INTEL_DIR/combined_threats.txt.tmp" "$THREAT_INTEL_DIR/combined_threats.txt"
 cp -f "$TMPDIR_WORK"/*.txt "$THREAT_INTEL_DIR"/ 2>/dev/null || true
 rm -rf "$TMPDIR_WORK"
 

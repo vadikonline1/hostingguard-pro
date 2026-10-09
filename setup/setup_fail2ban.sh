@@ -52,7 +52,7 @@ check_dependencies() {
         apt-get install -y python3-requests python3-bs4
     }
     
-    for cmd in ip iptables curl jq whois; do
+    for cmd in ip iptables curl jq whois ipset; do
         if ! command -v "$cmd" >/dev/null 2>&1; then
             echo "[*] Instalez $cmd..."
             apt-get install -y "$cmd"
@@ -91,11 +91,18 @@ clean_old_config() {
     rm -f "$FAIL2BAN_DIR/action.d/telegram-simple.conf"
     rm -f "$FAIL2BAN_DIR/action.d/telegram-escalation.conf"
     
-    # Curăță iptables
+    # Curăță iptables: sterge TOATE jump-urile duplicate catre lanturile f2b-*
+    # (fail2ban le recreeaza singur la start; duplicatele incetinesc fiecare pachet)
+    iptables -S INPUT 2>/dev/null | grep -- '-j f2b-' | sed 's/^-A INPUT //' | while IFS= read -r spec; do
+        [ -z "$spec" ] && continue
+        # shellcheck disable=SC2086
+        while iptables -D INPUT $spec 2>/dev/null; do :; done
+    done || true
+    # Curatare tinte vechi cunoscute (compatibilitate)
     iptables -D INPUT -p tcp -m multiport --dports 80,443 -j f2b-web-attacks 2>/dev/null || true
     iptables -D INPUT -p tcp -m multiport --dports 80,443,22 -j f2b-auth-attacks 2>/dev/null || true
     iptables -D INPUT -p tcp --dport 22 -j f2b-sshd 2>/dev/null || true
-    
+
     echo "[+] Configurație veche curățată"
 }
 
@@ -534,7 +541,18 @@ EOF
 # === MANAGEMENT SIMPLIFICAT - INTERFAȚĂ UNIFICATĂ ===
 setup_unified_interface() {
     echo "[*] Configurare interfață unificată..."
-    
+
+    # NU suprascrie varianta din repo (are comenzi whitelist)
+    if grep -q "whitelist-add" "$SCRIPT_DIR/security-manager.sh" 2>/dev/null; then
+        echo "[+] security-manager din repo deja prezent (cu whitelist) — il pastrez"
+        chmod +x "$SCRIPT_DIR/security-manager.sh"
+        if [ -d "/usr/local/bin" ]; then
+            ln -sf "$SCRIPT_DIR/security-manager.sh" "/usr/local/bin/secmgr"
+            chmod +x "/usr/local/bin/secmgr"
+        fi
+        echo "[+] Interfață unificată configurată"
+        return 0
+    fi
     cat > "$SCRIPT_DIR/security-manager.sh" << 'EOF'
 #!/bin/bash
 BOUNCER_DIR="/etc/automation-web-hosting"
@@ -967,6 +985,72 @@ EOF
     echo "[+] Sistem notificări inteligente configurat complet cu suport threat intelligence"
 }
 
+# === BANACTION IPSET + WHITELIST IGNOREIP (anti-blocare IP-uri proprii) ===
+detect_ipset() {
+    command -v ipset >/dev/null 2>&1 || return 1
+    ipset create hg-probe hash:ip timeout 60 2>/dev/null || return 1
+    ipset destroy hg-probe 2>/dev/null || true
+    # regula de test cu set (verifica si suportul iptables)
+    ipset create hg-probe hash:ip timeout 60 2>/dev/null || return 1
+    iptables -I INPUT -m set --match-set hg-probe src -j RETURN 2>/dev/null || { ipset destroy hg-probe 2>/dev/null; return 1; }
+    iptables -D INPUT -m set --match-set hg-probe src -j RETURN 2>/dev/null || true
+    ipset destroy hg-probe 2>/dev/null || true
+    return 0
+}
+
+apply_banaction_and_whitelist() {
+    echo "[*] Configurare banaction + whitelist..."
+
+    # ipset = 1 regula hash in loc de sute de reguli liniare (testat suport kernel;
+    # pe OpenVZ/Virtuozzo fara ipset se revine automat la iptables-multiport)
+    local banaction="iptables-multiport"
+    if [ "${USE_IPSET:-1}" = "1" ] && detect_ipset; then
+        if command -v ip6tables >/dev/null 2>&1; then
+            banaction="iptables-ipset-proto6"
+        else
+            banaction="iptables-ipset-proto4"
+        fi
+        echo "[+] ipset suportat — banaction: $banaction"
+    else
+        echo "[!] ipset indisponibil sau dezactivat — banaction: iptables-multiport"
+    fi
+    sed -i "s|^banaction = .*|banaction = $banaction|" "$FAIL2BAN_DIR/jail.local"
+
+    # whitelist din hosting.env → fail2ban ignoreip (altfel propriul IP e banat)
+    local wl
+    wl=$(echo "${WHITELIST_IPS:-}" | tr ' ' '\n' | grep -v change-me | grep -v '^$' | tr '\n' ' ')
+    if [ -n "$(echo "$wl" | tr -d ' ')" ]; then
+        for ip in $wl; do
+            if ! grep -q "$ip" "$FAIL2BAN_DIR/jail.local"; then
+                sed -i "s|^ignoreip = \(.*\)$|ignoreip = \1 $ip|" "$FAIL2BAN_DIR/jail.local"
+                echo "[+] Whitelist in ignoreip: $ip"
+            fi
+        done
+    else
+        echo "[!] WHITELIST_IPS gol — completeaza-l in hosting.env cu IP-ul tau de admin"
+    fi
+}
+
+# === WHITELIST GUARD (verificare orara, usoara) ===
+setup_whitelist_guard() {
+    echo "[*] Configurare whitelist guard..."
+
+    local guard="$SCRIPT_DIR/whitelist-guard.sh"
+    if [ ! -f "$guard" ]; then
+        echo "[-] Guard lipsa: $guard (fa git pull)"
+        return 1
+    fi
+    chmod +x "$guard"
+
+    # Verificare orara (ruleaza in <5s: doar iptables -C + socket fail2ban)
+    (crontab -l 2>/dev/null | grep -v "whitelist-guard.sh"; echo "17 * * * * /usr/bin/flock -n /run/hg-cron-whitelist.lock $guard >> /etc/automation-web-hosting/log/whitelist-guard.log 2>&1") | crontab -
+
+    # Prima rulare imediata — repara ACUM un eventual IP whitelisted blocat
+    "$guard" || true
+
+    echo "[+] Whitelist guard configurat (verificare orara)"
+}
+
 # === EXECUȚIE PRINCIPALĂ ===
 main() {
     echo "=================================================="
@@ -1001,12 +1085,15 @@ main() {
     setup_basic_fail2ban
     # Setup acțiuni Telegram
     setup_advanced_telegram_system
-	
+    # Banaction ipset (rapid) + whitelist in ignoreip — INAINTE de restart
+    apply_banaction_and_whitelist
+
     # Setup componente avansate
     setup_backup_system
     setup_threat_intelligence
     setup_behavioral_analysis
     setup_autohealing
+    setup_whitelist_guard
     setup_advanced_reporting
     setup_unified_interface
 
@@ -1039,6 +1126,8 @@ main() {
     echo "   secmgr status        - Status sistem"
     echo "   secmgr stats         - Statistici detaliate" 
     echo "   secmgr unban IP      - Deblochează IP"
+    echo "   secmgr whitelist     - Status whitelist (IP-uri protejate)"
+    echo "   secmgr whitelist-add IP - Adauga IP in whitelist (nu mai e blocat)"
     echo "   secmgr backup        - Backup configurație"
     echo "   secmgr update-threat - Actualizează amenințări"
     echo "   secmgr report        - Raport complet"
@@ -1049,10 +1138,11 @@ main() {
     echo "   fail2ban-client status"
     echo ""
     echo "🔄 SERVICII AUTOMATE:"
-    echo "   Backup zilnic (2 AM)       - $SCRIPT_DIR/fail2ban-backup.sh"
-    echo "   Threat Intel update (3 AM) - $SCRIPT_DIR/update-threat-intel.sh" 
-    echo "   Raport zilnic (8 AM)       - $SCRIPT_DIR/fail2ban-report.sh"
-    echo "   Auto-Healing (la 5 minute) - $AUTO_HEAL_SCRIPT"
+    echo "   Backup zilnic (02:05)      - $SCRIPT_DIR/fail2ban-backup.sh"
+    echo "   Threat Intel (dum 03:00)   - $SCRIPT_DIR/update-threat-intel.sh"
+    echo "   Raport zilnic (08:00)      - $SCRIPT_DIR/fail2ban-report.sh"
+    echo "   Auto-Healing (15 min)      - $AUTO_HEAL_SCRIPT"
+    echo "   Whitelist guard (orar)     - $SCRIPT_DIR/whitelist-guard.sh"
     echo "=================================================="
     
     # Afișare conținut director scripturi

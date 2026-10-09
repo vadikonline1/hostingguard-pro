@@ -31,5 +31,8 @@
 # Auto-healing la 15 MINUTE (inainte la 5 min = treziri + restarturi + spam Telegram)
 */15 * * * * /usr/bin/flock -n /run/hg-cron-heal.lock /etc/automation-web-hosting/scripts/fail2ban_autoheal.sh >> /etc/automation-web-hosting/log/autoheal.log 2>&1
 
+# Whitelist guard ORAR (ruleaza in <5s; garanteaza ca IP-urile proprii nu sunt blocate)
+17 * * * * /usr/bin/flock -n /run/hg-cron-whitelist.lock /etc/automation-web-hosting/scripts/whitelist-guard.sh >> /etc/automation-web-hosting/log/whitelist-guard.log 2>&1
+
 # Raport zilnic 08:00 (ieftin, il pastram)
 0 8 * * * /usr/bin/flock -n /run/hg-cron-report.lock /etc/automation-web-hosting/scripts/fail2ban-report.sh daily >> /etc/automation-web-hosting/log/report.log 2>&1

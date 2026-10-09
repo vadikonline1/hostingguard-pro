@@ -15,11 +15,11 @@ done
 
 send_telegram_notification() {
     local MESSAGE="$1"
-    local ENV_FILE="$CURRENT_PATH_DIR/hosting_env.env"
 
-    # Load environment variables
-    if [ -f "$ENV_FILE" ]; then
-        source "$ENV_FILE"
+    # Variabilele vin din hosting.env (incarcat de apelant sau aici ca fallback)
+    if [[ -z "$TELEGRAM_BOT_TOKEN" && -f "$CURRENT_PATH_DIR/hosting.env" ]]; then
+        # shellcheck disable=SC1091
+        source "$CURRENT_PATH_DIR/hosting.env" 2>/dev/null || true
     fi
 
     # If Telegram variables not set, just display
