@@ -69,5 +69,20 @@ send_telegram_notification() {
 
 # If script is called directly
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
-    send_telegram_notification "$1"
+    if [[ "${1:-}" == "-f" ]]; then
+        # Compatibilitate cu apelul vechi din fail2ban-report.sh:
+        #   echo "$raport" | telegram_notify.sh -f -
+        # "-f -" sau "-f" fara fisier = citeste mesajul din stdin.
+        # FARA acest branch, "$1" (= "-f") era trimis literal pe Telegram
+        # si continutul raportului se pierdea: "🛡️ DATA - -f".
+        if [[ -z "${2:-}" || "${2:-}" == "-" ]]; then
+            send_telegram_notification "$(cat)"
+        else
+            send_telegram_notification "$(cat -- "$2")"
+        fi
+    elif [[ "${1:-}" == "--stdin" ]]; then
+        send_telegram_notification "$(cat)"
+    else
+        send_telegram_notification "${1:-}"
+    fi
 fi

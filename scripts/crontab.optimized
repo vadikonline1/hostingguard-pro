@@ -39,3 +39,7 @@
 
 # Raport zilnic 08:00 (ieftin, il pastram)
 0 8 * * * /usr/bin/flock -n /run/hg-cron-report.lock /etc/automation-web-hosting/scripts/fail2ban-report.sh daily >> /etc/automation-web-hosting/log/report.log 2>&1
+
+# Verificare update SAPTAMANALA luni 06:00 (doar anunta pe Telegram daca apare
+# versiune noua in VERSION; NU face pull/rebuild singur — manual: secmgr update)
+0 6 * * 1 /usr/bin/flock -n /run/hg-cron-update.lock /etc/automation-web-hosting/scripts/self-update.sh --check >> /etc/automation-web-hosting/log/update.log 2>&1

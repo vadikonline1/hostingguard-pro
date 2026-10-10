@@ -21,7 +21,7 @@ case "$1" in
             exit 1
         fi
         echo "[*] Deblochez IP: $2"
-        for jail in $(fail2ban-client status 2>/dev/null | sed -n 's/.*Jail list:[^:]*://p' | tr ',:\t' '   '); do
+        for jail in $(fail2ban-client status 2>/dev/null | grep "Jail list" | cut -d: -f2- | tr ',' ' '); do
             fail2ban-client set "$jail" unbanip "$2" >/dev/null 2>&1 && echo "  - scos din $jail"
         done
         ;;
@@ -79,6 +79,15 @@ case "$1" in
         echo "[*] Generez raport..."
         "$SCRIPT_DIR/fail2ban-report.sh"
         ;;
+    version)
+        echo -n "HostingGuard versiune: "
+        cat "$BOUNCER_DIR/VERSION" 2>/dev/null || echo "necunoscut (lipseste $BOUNCER_DIR/VERSION)"
+        ;;
+    update)
+        # secmgr update [--check|--force] → pull + rebuild la versiune noua
+        echo "[*] Verific update-uri..."
+        bash "$SCRIPT_DIR/self-update.sh" "${2:-}"
+        ;;
     autoheal)
         echo "[*] Rulez Auto-Healing..."
         "$SCRIPT_DIR/fail2ban_autoheal.sh"
@@ -94,6 +103,8 @@ case "$1" in
         echo "  backup            - Backup configurație"
         echo "  update-threat     - Actualizează liste amenințări"
         echo "  report            - Generează raport"
+        echo "  version           - Arată versiunea instalată"
+        echo "  update [--check|--force] - Actualizează la versiunea nouă + rebuild"
         echo "  autoheal          - Rulează Auto-Healing manual"
         ;;
 esac

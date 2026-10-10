@@ -261,6 +261,7 @@ setup_cron_jobs_simple() {
         | grep -v "rkhunter --update" | grep -v "fail2ban-backup.sh" \
         | grep -v "update-threat-intel.sh" | grep -v "fail2ban_autoheal" \
         | grep -v "whitelist-guard.sh" \
+        | grep -v "self-update.sh" \
         | grep -v "prune-logs.sh" \
         | grep -v "fail2ban-report.sh" > "$tmpcron" || true
 
@@ -279,6 +280,7 @@ setup_cron_jobs_simple() {
 */15 * * * * /usr/bin/flock -n /run/hg-cron-heal.lock $SCRIPT_DIR/scripts/fail2ban_autoheal.sh >> $LOG_DIR/autoheal.log 2>&1
 17 * * * * /usr/bin/flock -n /run/hg-cron-whitelist.lock $SCRIPT_DIR/scripts/whitelist-guard.sh >> $LOG_DIR/whitelist-guard.log 2>&1
 0 8 * * * /usr/bin/flock -n /run/hg-cron-report.lock $SCRIPT_DIR/scripts/fail2ban-report.sh daily >> $LOG_DIR/report.log 2>&1
+0 6 * * 1 /usr/bin/flock -n /run/hg-cron-update.lock $SCRIPT_DIR/scripts/self-update.sh --check >> $LOG_DIR/update.log 2>&1
 # NOTA: freshclam e gestionat de daemon (clamav-freshclam), NU din cron.
 # rkhunter --propupd e dezactivat implicit (ENABLE_RKHUNTER=0) — prea greu pe VPS.
 # ===========================================

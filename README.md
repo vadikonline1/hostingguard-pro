@@ -110,6 +110,9 @@ secmgr whitelist-add IP  # add IP to whitelist and enforce immediately
 secmgr backup            # manual config backup
 secmgr update-threat     # manual threat-list refresh
 secmgr report            # full report
+secmgr version           # installed version
+secmgr update            # pull new version + rebuild (checks VERSION)
+secmgr update --check    # only check, no changes
 secmgr autoheal          # manual health check
 ```
 
@@ -121,7 +124,7 @@ manually, so a whitelisted IP still gets REJECTed. The guard fixes the order:
 ```bash
 # Emergency: unban yourself RIGHT NOW (replace with your IP)
 IP=YOUR_ADMIN_IP
-for j in $(fail2ban-client status | sed -n 's/.*Jail list:[^:]*://p' | tr ',' ' '); do
+for j in $(fail2ban-client status | grep "Jail list" | cut -d: -f2- | tr ',' ' '); do
   fail2ban-client set "$j" unbanip "$IP"
 done
 iptables -I INPUT 1 -s "$IP" -j ACCEPT
@@ -134,6 +137,14 @@ Verify with `iptables -L INPUT -n --line-numbers` — your IP must be line 1,
 **above** every `f2b-*` jump. `secmgr whitelist` checks this for you.
 
 ## Update procedure
+
+```bash
+secmgr backup
+secmgr update            # pull + rebuild la versiunea noua (verifica VERSION)
+secmgr status && secmgr whitelist
+```
+
+Manual, pas cu pas (acelasi lucru face `secmgr update`):
 
 ```bash
 secmgr backup

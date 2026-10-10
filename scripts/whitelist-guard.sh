@@ -51,7 +51,9 @@ CHANGED=0
 NOTES=""
 
 jail_list() {
-    fail2ban-client status 2>/dev/null | sed -n 's/.*Jail list:[^:]*://p' | tr ',:\t' '   '
+    # Linia reala arata asa: "`- Jail list:\tsshd, web-attacks" (fara al doilea
+    # ":"), deci taiem dupa primul ":" si spargem dupa virgula.
+    fail2ban-client status 2>/dev/null | grep "Jail list" | cut -d: -f2- | tr ',' ' '
 }
 
 is_banned() {
